@@ -62,6 +62,10 @@ the other way."
   "Profile name of the current query or REPL buffer.")
 (put 'devtools-sql-profile 'permanent-local t)
 
+(defvar-local devtools-sql-query-name nil
+  "Name of this query file, or nil for its datasource's default file.")
+(put 'devtools-sql-query-name 'permanent-local t)
+
 (defvar-local devtools-sql--session nil
   "The server session of this query buffer, as (GENERATION . ID).
 GENERATION is `devtools-server-generation' when it was opened.")
@@ -138,8 +142,9 @@ or \"failed\", or nil before its first run.")
   "Header line showing which environment and database a buffer targets."
   (when devtools-sql-connection
     (concat (devtools-profile-label devtools-sql-profile)
-            " " (plist-get devtools-sql-connection :name) "  "
-            (propertize (devtools-sql--describe devtools-sql-connection) 'face 'shadow)
+            " " (plist-get devtools-sql-connection :name)
+            (when devtools-sql-query-name (concat "/" devtools-sql-query-name))
+            "  " (propertize (devtools-sql--describe devtools-sql-connection) 'face 'shadow)
             (when (devtools-sql--read-only-p devtools-sql-connection devtools-sql-profile)
               (propertize "  read-only" 'face 'warning))
             (pcase devtools-sql--tx-status
@@ -188,44 +193,73 @@ or \"failed\", or nil before its first run.")
   (pop-to-buffer (devtools-sql--start conn (devtools-current-profile))))
 
 ;;;###autoload
-(defun devtools-sql-query (conn)
-  "Open the query file for CONN in the current environment.
+(defun devtools-sql-query (conn &optional name)
+  "Open a query file of CONN in the current environment.
+Without NAME, the datasource's default file; with NAME, its file NAME,
+created if new.  Interactively, a prefix argument asks for NAME.
 \\<devtools-sql-query-mode-map>\\[devtools-sql-run] runs the query at point, or the region."
-  (interactive (list (devtools-sql--read-connection)))
+  (interactive
+   (let ((conn (devtools-sql--read-connection)))
+     (list conn (and current-prefix-arg
+                     (devtools-sql--read-query-name conn (devtools-current-profile))))))
   (let* ((profile (devtools-current-profile))
-         (file (devtools-sql--query-file conn profile)))
+         (file (devtools-sql--query-file conn profile name)))
     (make-directory (file-name-directory file) t)
     (prog1 (find-file file)
-      (devtools-sql--link-query-buffer conn profile))))
+      (devtools-sql--link-query-buffer conn profile name))))
 
-(defun devtools-sql--query-file (conn profile)
-  "Return the query file of CONN in PROFILE."
-  (expand-file-name (format "%s/%s.sql" profile (plist-get conn :name))
+(defun devtools-sql--query-file (conn profile &optional name)
+  "Return the query file of CONN in PROFILE.
+That is PROFILE/CONN.sql, or PROFILE/CONN/NAME.sql given NAME."
+  (expand-file-name (if name
+                        (format "%s/%s/%s.sql" profile (plist-get conn :name) name)
+                      (format "%s/%s.sql" profile (plist-get conn :name)))
                     devtools-sql-query-directory))
 
-(defun devtools-sql--link-query-buffer (conn profile)
-  "Make the current buffer run its queries on CONN in PROFILE."
+(defun devtools-sql--query-names (conn profile)
+  "Return the names of the query files of CONN in PROFILE.
+The default file is not among them."
+  (let ((dir (file-name-sans-extension (devtools-sql--query-file conn profile))))
+    (and (file-directory-p dir)
+         (mapcar #'file-name-base (directory-files dir nil "\\.sql\\'")))))
+
+(defun devtools-sql--read-query-name (conn profile)
+  "Ask for the name of a query file of CONN in PROFILE, new or existing."
+  (let ((name (string-trim
+               (completing-read (format "Query file of %s/%s: " profile (plist-get conn :name))
+                                (devtools-sql--query-names conn profile)))))
+    (when (or (string-empty-p name) (string-search "/" name))
+      (user-error "A query file name cannot be empty or contain a slash"))
+    name))
+
+(defun devtools-sql--link-query-buffer (conn profile &optional name)
+  "Make the current buffer run its queries on CONN in PROFILE.
+NAME is the query file's name, nil for the default file."
   (unless (derived-mode-p 'sql-mode)
     (sql-mode))
   (sql-set-product 'postgres)
   (devtools-sql--mark-buffer conn profile)
+  (setq devtools-sql-query-name name)
   (add-hook 'kill-buffer-hook #'devtools-sql--close-session nil t)
   (devtools-sql-query-mode 1))
 
 (defun devtools-sql-link-query-file ()
   "Link a file under `devtools-sql-query-directory' to its connection.
-Files are named PROFILE/CONNECTION.sql; for `find-file-hook'."
+Files are PROFILE/CONNECTION.sql or PROFILE/CONNECTION/NAME.sql; for
+`find-file-hook'."
   (when-let* ((file buffer-file-name)
+              ((string-suffix-p ".sql" file))
               (dir (file-name-as-directory (expand-file-name devtools-sql-query-directory)))
               ((string-prefix-p dir (expand-file-name file)))
               (parts (split-string (file-relative-name file dir) "/"))
-              ((length= parts 2))
+              ((memq (length parts) '(2 3)))
               (profile (intern (car parts)))
               ((assq profile devtools-profiles))
-              (conn (seq-find (lambda (c) (equal (plist-get c :name)
-                                                 (file-name-base (cadr parts))))
+              (conn-name (if (length= parts 2) (file-name-base (cadr parts)) (cadr parts)))
+              (conn (seq-find (lambda (c) (equal (plist-get c :name) conn-name))
                               (devtools-env :postgres profile))))
-    (devtools-sql--link-query-buffer conn profile)))
+    (devtools-sql--link-query-buffer conn profile
+                                     (and (length= parts 3) (file-name-base (nth 2 parts))))))
 
 ;;; Running queries into a result buffer
 
@@ -510,69 +544,72 @@ and the error plist."
           conn profile "query/execute"
           (list :sql sql :maxRows devtools-sql-result-max-rows) callback)))))))
 
-(defun devtools-sql-execute (conn profile query &optional session-buffer)
+(defun devtools-sql-execute (conn profile query &optional source use-session)
   "Run QUERY on CONN in PROFILE and show the result in a result buffer.
-With SESSION-BUFFER, a query buffer, run on its session; else on the
-pool.  Only the result of the last statement is shown."
-  (when (and (buffer-live-p session-buffer)
-             (buffer-local-value 'devtools-sql--session-busy session-buffer))
-    (user-error "The session is still running a query; %s runs on the pool instead"
-                (substitute-command-keys "\\[universal-argument] \\[devtools-sql-run]")))
-  ;; Fail before touching the result buffer if the server cannot start.
-  (devtools-server)
-  (setq conn (devtools-sql--current-connection conn profile))
-  (when (buffer-live-p session-buffer)
-    (with-current-buffer session-buffer
-      (setq devtools-sql-connection conn)))
-  (devtools-sql--refresh-connection conn profile)
-  (let ((result (devtools-sql-result-start
-                 conn profile
-                 (lambda ()
-                   (devtools-sql-execute conn profile query
-                                         (and (buffer-live-p session-buffer) session-buffer)))
-                 query))
-        (target (if (buffer-live-p session-buffer) 'session 'pool))
-        (started (float-time))
-        (run (list 'run)))
-    (with-current-buffer result
-      (setq devtools-sql-result--info
-            (plist-put (plist-put devtools-sql-result--info :run run) :target target)))
-    (when (eq target 'session)
-      (with-current-buffer session-buffer
-        (setq devtools-sql--session-busy t)))
-    (devtools-sql-server-execute
-     conn profile query
-     (lambda (response error)
-       (when (buffer-live-p session-buffer)
-         (with-current-buffer session-buffer
-           (setq devtools-sql--session-busy nil)))
-       ;; A query that was run again in the meantime is stale.
-       (when (eq run (devtools-sql--result-run conn profile))
-         (when (eq target 'session)
-           (with-current-buffer result
-             (setq devtools-sql-result--info
-                   (plist-put devtools-sql-result--info :tx
-                              (or (plist-get response :txStatus)
-                                  (plist-get (plist-get error :data) :txStatus))))))
-         (if error
-             (devtools-sql-result-show-error
-              result
-              (if (devtools-sql--session-gone-p error)
-                  (plist-put (copy-sequence error) :message
-                             (concat (plist-get error :message)
-                                     ".  Run again to start a new session."))
-                error)
-              (- (float-time) started))
-           (devtools-sql-result-show result response (- (float-time) started))))
-       (run-hook-with-args 'devtools-sql-after-execute-functions conn profile
-                           (and response
-                                (mapcar (lambda (set) (plist-get set :command))
-                                        (plist-get response :results)))))
-     (and (eq target 'session) session-buffer))))
+SOURCE is the query buffer it comes from, if any: its result buffer
+shows the result.  With USE-SESSION, run on SOURCE's session; else on
+the pool.  Only the result of the last statement is shown."
+  (let* ((source (and (buffer-live-p source) source))
+         (session-buffer (and use-session source))
+         (name (and source (buffer-local-value 'devtools-sql-query-name source))))
+    (when (and session-buffer
+               (buffer-local-value 'devtools-sql--session-busy session-buffer))
+      (user-error "The session is still running a query; %s runs on the pool instead"
+                  (substitute-command-keys "\\[universal-argument] \\[devtools-sql-run]")))
+    ;; Fail before touching the result buffer if the server cannot start.
+    (devtools-server)
+    (setq conn (devtools-sql--current-connection conn profile))
+    (when source
+      (with-current-buffer source
+        (setq devtools-sql-connection conn)))
+    (devtools-sql--refresh-connection conn profile)
+    (let ((result (devtools-sql-result-start
+                   conn profile
+                   (lambda () (devtools-sql-execute conn profile query source use-session))
+                   query name))
+          (target (if session-buffer 'session 'pool))
+          (started (float-time))
+          (run (list 'run)))
+      (with-current-buffer result
+        (setq devtools-sql-result--info
+              (plist-put (plist-put devtools-sql-result--info :run run) :target target)))
+      (when session-buffer
+        (with-current-buffer session-buffer
+          (setq devtools-sql--session-busy t)))
+      (devtools-sql-server-execute
+       conn profile query
+       (lambda (response error)
+         (when (buffer-live-p session-buffer)
+           (with-current-buffer session-buffer
+             (setq devtools-sql--session-busy nil)))
+         ;; A query that was run again in the meantime is stale.
+         (when (eq run (devtools-sql--result-run conn profile name))
+           (when session-buffer
+             (with-current-buffer result
+               (setq devtools-sql-result--info
+                     (plist-put devtools-sql-result--info :tx
+                                (or (plist-get response :txStatus)
+                                    (plist-get (plist-get error :data) :txStatus))))))
+           (if error
+               (devtools-sql-result-show-error
+                result
+                (if (devtools-sql--session-gone-p error)
+                    (plist-put (copy-sequence error) :message
+                               (concat (plist-get error :message)
+                                       ".  Run again to start a new session."))
+                  error)
+                (- (float-time) started))
+             (devtools-sql-result-show result response (- (float-time) started))))
+         (run-hook-with-args 'devtools-sql-after-execute-functions conn profile
+                             (and response
+                                  (mapcar (lambda (set) (plist-get set :command))
+                                          (plist-get response :results)))))
+       session-buffer))))
 
-(defun devtools-sql--result-run (conn profile)
-  "Return the token of the latest run in the result buffer of CONN in PROFILE."
-  (when-let* ((buffer (get-buffer (devtools-sql-result-buffer-name conn profile))))
+(defun devtools-sql--result-run (conn profile &optional name)
+  "Return the token of the latest run in a result buffer of CONN in PROFILE.
+NAME is the query file's name, nil for the default file."
+  (when-let* ((buffer (get-buffer (devtools-sql-result-buffer-name conn profile name))))
     (plist-get (buffer-local-value 'devtools-sql-result--info buffer) :run)))
 
 (defun devtools-sql-run (start end &optional other)
@@ -594,7 +631,7 @@ OTHER; `devtools-sql-query-files-use-session' swaps the two."
       (user-error "No query at point"))
     (pulse-momentary-highlight-region start end)
     (devtools-sql-execute devtools-sql-connection devtools-sql-profile query
-                          (and (devtools-sql--use-session-p other) (current-buffer)))))
+                          (current-buffer) (devtools-sql--use-session-p other))))
 
 (defun devtools-sql-run-string (query &optional other)
   "Run QUERY and show its rows.
@@ -604,7 +641,7 @@ environment."
   (interactive (list (read-string "Query: ") current-prefix-arg))
   (if devtools-sql-connection
       (devtools-sql-execute devtools-sql-connection devtools-sql-profile query
-                            (and (devtools-sql--use-session-p other) (current-buffer)))
+                            (current-buffer) (devtools-sql--use-session-p other))
     (devtools-sql-execute (devtools-sql--read-connection) (devtools-current-profile) query)))
 
 (defun devtools-sql-repl-for-buffer ()

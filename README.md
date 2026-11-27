@@ -57,7 +57,14 @@ The rows show up as an aligned table in `*SQL Result: local/app*`.
 |-----------|---------------------------------------------------|
 | `C-c d e` | Switch environment (menu stays open)              |
 | `C-c d p` | psql REPL for a connection                        |
-| `C-c d q` | Query file for a connection                       |
+| `C-c d q` | Default query file of a datasource                |
+| `C-u C-c d q` | Another query file of a datasource, by name (new or existing) |
+
+Each datasource (an entry under `:postgres`) has a default query file,
+`<environment>/<datasource>.sql`, and as many named ones as you like,
+`<environment>/<datasource>/<name>.sql`, all under
+`devtools-sql-query-directory`.  Each file has its own session and its own
+result buffer (`*SQL Result: prod/app*`, `*SQL Result: prod/app/cleanup*`).
 
 In a query file (`devtools-sql-query-mode`):
 

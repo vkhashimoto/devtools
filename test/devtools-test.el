@@ -734,4 +734,78 @@
                                 messages))))
         (unless devtools-mode-was (devtools-mode -1))))))
 
+;;; Several query files per datasource
+
+(ert-deftest devtools-test-query-file-paths ()
+  (let ((devtools-sql-query-directory "/q/"))
+    (should (equal (devtools-sql--query-file '(:name "app") 'prod) "/q/prod/app.sql"))
+    (should (equal (devtools-sql--query-file '(:name "app") 'prod "cleanup") "/q/prod/app/cleanup.sql")))
+  (should (equal (devtools-sql-result-buffer-name '(:name "app") 'prod) "*SQL Result: prod/app*"))
+  (should (equal (devtools-sql-result-buffer-name '(:name "app") 'prod "cleanup")
+                 "*SQL Result: prod/app/cleanup*")))
+
+(ert-deftest devtools-test-named-query-file-links-on-open ()
+  (devtools-test--with-profiles
+    (let* ((devtools-sql-query-directory (make-temp-file "devtools-sql" t))
+           (file (devtools-sql--query-file (devtools-test--conn 'prod "writer") 'prod "cleanup"))
+           (find-file-hook '(devtools-sql-link-query-file)))
+      (unwind-protect
+          (progn
+            (make-directory (file-name-directory file) t)
+            (write-region "" nil file)
+            (write-region "" nil (expand-file-name "other.sql" (file-name-directory file)))
+            (should (equal (sort (devtools-sql--query-names (devtools-test--conn 'prod "writer") 'prod)
+                                 #'string<)
+                           '("cleanup" "other")))
+            (with-current-buffer (find-file-noselect file)
+              (unwind-protect
+                  (progn
+                    (should devtools-sql-query-mode)
+                    (should (equal (plist-get devtools-sql-connection :name) "writer"))
+                    (should (equal devtools-sql-query-name "cleanup"))
+                    (should (string-match-p "writer/cleanup" (devtools-sql--header-line))))
+                (kill-buffer))))
+        (delete-directory devtools-sql-query-directory t)))))
+
+(ert-deftest devtools-test-read-query-name ()
+  (devtools-test--with-profiles
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) " cleanup ")))
+      (should (equal (devtools-sql--read-query-name (devtools-test--conn 'local "app") 'local) "cleanup")))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "a/b")))
+      (should-error (devtools-sql--read-query-name (devtools-test--conn 'local "app") 'local)
+                    :type 'user-error))))
+
+(ert-deftest devtools-test-postgres-query-files-are-independent ()
+  (skip-unless (devtools-test--server-p))
+  (devtools-test--with-profiles
+    (let* ((devtools-sql-query-directory (make-temp-file "devtools-sql" t))
+           (conn (devtools-test--conn 'local "app"))
+           (default (save-window-excursion (devtools-sql-query conn)))
+           (named (save-window-excursion (devtools-sql-query conn "report"))))
+      (unwind-protect
+          (progn
+            (should (string-suffix-p "/local/app/report.sql" (buffer-file-name named)))
+            (with-current-buffer default
+              (save-window-excursion (devtools-sql-run-string "begin")))
+            (with-current-buffer named
+              (save-window-excursion (devtools-sql-run-string "select 'report' as source")))
+            (let ((default-result (get-buffer "*SQL Result: local/app*"))
+                  (named-result (get-buffer "*SQL Result: local/app/report*")))
+              (should (eq (devtools-test--wait-for-result default-result) 'done))
+              (should (eq (devtools-test--wait-for-result named-result) 'done))
+              (should (string-match-p "report" (devtools-test--result-text named-result)))
+              (should (string-match-p "local  app/report  1 rows" (devtools-test--result-header named-result))))
+            ;; Separate sessions: the transaction is only in the default file.
+            (should (equal (buffer-local-value 'devtools-sql--tx-status default) "transaction"))
+            (should (equal (buffer-local-value 'devtools-sql--tx-status named) "idle"))
+            (should-not (equal (buffer-local-value 'devtools-sql--session default)
+                               (buffer-local-value 'devtools-sql--session named))))
+        (dolist (buffer (list default named
+                              (get-buffer "*SQL Result: local/app*")
+                              (get-buffer "*SQL Result: local/app/report*")))
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer (set-buffer-modified-p nil))
+            (kill-buffer buffer)))
+        (delete-directory devtools-sql-query-directory t)))))
+
 ;;; devtools-test.el ends here

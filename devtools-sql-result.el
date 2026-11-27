@@ -80,7 +80,7 @@
 (put 'devtools-sql-result-rerun 'permanent-local t)
 
 (defvar-local devtools-sql-result--info nil
-  "Plist describing the result: :connection :profile :sql :state :run
+  "Plist describing the result: :connection :profile :name :sql :state :run
 :target (`session' or `pool') :tx :elapsed :statements :shown-rows
 :total-rows.")
 (put 'devtools-sql-result--info 'permanent-local t)
@@ -94,15 +94,18 @@ ROW counts table lines from 1, skipping rule lines; the header is row 1.")
 
 ;;; Rendering
 
-(defun devtools-sql-result-buffer-name (connection profile)
-  "Return the result buffer name for CONNECTION in PROFILE."
-  (format "*SQL Result: %s/%s*" profile (plist-get connection :name)))
+(defun devtools-sql-result-buffer-name (connection profile &optional name)
+  "Return the result buffer name for CONNECTION in PROFILE.
+NAME is the query file's name, nil for the default file."
+  (format "*SQL Result: %s/%s%s*" profile (plist-get connection :name)
+          (if name (concat "/" name) "")))
 
-(defun devtools-sql-result-start (connection profile rerun &optional sql)
+(defun devtools-sql-result-start (connection profile rerun &optional sql name)
   "Prepare and show the result buffer for a query on CONNECTION in PROFILE.
 RERUN is a function that runs the query again; SQL is the query, used
-to point at errors.  Return the buffer."
-  (with-current-buffer (get-buffer-create (devtools-sql-result-buffer-name connection profile))
+to point at errors; NAME is the query file's name, nil for the default
+file.  Return the buffer."
+  (with-current-buffer (get-buffer-create (devtools-sql-result-buffer-name connection profile name))
     (let ((inhibit-read-only t))
       (devtools-sql-result-mode -1)
       (devtools-sql-result--clear-overlays)
@@ -111,7 +114,7 @@ to point at errors.  Return the buffer."
       (insert (propertize "Running..." 'face 'shadow)))
     (setq devtools-sql-result-rerun rerun
           devtools-sql-result--info (list :connection connection :profile profile
-                                          :sql sql :state 'running)
+                                          :name name :sql sql :state 'running)
           header-line-format '(:eval (devtools-sql-result--header-line))
           truncate-lines t)
     (set-buffer-modified-p nil)
@@ -243,7 +246,9 @@ ELAPSED is in seconds."
                        ("failed" (propertize " · transaction failed" 'face 'error))))))))
     (concat
      (devtools-profile-label (plist-get info :profile))
-     " " (plist-get connection :name) "  " summary target
+     " " (plist-get connection :name)
+     (when-let* ((name (plist-get info :name))) (concat "/" name))
+     "  " summary target
      (when (and devtools-sql-result-mode
                 (> (or (cdr devtools-sql-result--table-size) 0) 0))
        (let ((rows (length (delete-dups (delq 1 (mapcar #'car devtools-sql-result--marks)))))

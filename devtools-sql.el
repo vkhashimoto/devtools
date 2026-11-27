@@ -95,9 +95,31 @@ or \"failed\", or nil before its first run.")
       (user-error "Environment `%s' has no :postgres connections"
                   (or profile (devtools-current-profile)))))
 
-(defun devtools-sql--read-connection ()
-  "Pick a Postgres connection of the current profile."
-  (let ((conns (devtools-sql--connections)))
+(defun devtools-sql--buffer-context ()
+  "Return (PROFILE . CONN) of the current query, REPL or result buffer.
+Return nil elsewhere, or if PROFILE is no longer in the profiles."
+  (let ((context (cond (devtools-sql-connection
+                        (cons devtools-sql-profile devtools-sql-connection))
+                       ((bound-and-true-p devtools-sql-result--info)
+                        (cons (plist-get devtools-sql-result--info :profile)
+                              (plist-get devtools-sql-result--info :connection))))))
+    (and (car context) (assq (car context) devtools-profiles) context)))
+
+(defun devtools-sql-command-profile ()
+  "Return the environment for a devtools command run now.
+That is the current buffer's environment in a query, REPL or result
+buffer, else the current environment."
+  (or (car (devtools-sql--buffer-context))
+      (devtools-current-profile)))
+
+(defun devtools-sql--read-connection (&optional profile)
+  "Pick a Postgres connection of PROFILE.
+PROFILE defaults to `devtools-sql-command-profile'.  The current
+buffer's datasource, when of PROFILE, is the default choice."
+  (let* ((profile (or profile (devtools-sql-command-profile)))
+         (conns (devtools-sql--connections profile))
+         (context (devtools-sql--buffer-context))
+         (default (and (eq (car context) profile) (plist-get (cdr context) :name))))
     (if (length= conns 1)
         (car conns)
       (let* ((find (lambda (name)
@@ -108,9 +130,9 @@ or \"failed\", or nil before its first run.")
                    (propertize (concat "  " (devtools-sql--describe (funcall find name)))
                                'face 'completions-annotations)))))
         (funcall find (completing-read
-                       (format "Postgres [%s]: " (devtools-current-profile))
+                       (format-prompt "Datasource [%s]" default profile)
                        (mapcar (lambda (c) (plist-get c :name)) conns)
-                       nil t))))))
+                       nil t nil nil default))))))
 
 (defun devtools-sql--read-only-p (conn profile)
   "Return non-nil if CONN in PROFILE should be read-only."
@@ -188,26 +210,32 @@ or \"failed\", or nil before its first run.")
         buf))))
 
 ;;;###autoload
-(defun devtools-sql-connect (conn)
-  "Open a psql REPL for CONN in the current environment."
-  (interactive (list (devtools-sql--read-connection)))
-  (pop-to-buffer (devtools-sql--start conn (devtools-current-profile))))
+(defun devtools-sql-connect (conn &optional profile)
+  "Open a psql REPL for CONN in PROFILE.
+PROFILE defaults to the current environment; interactively, to
+`devtools-sql-command-profile'."
+  (interactive (let ((profile (devtools-sql-command-profile)))
+                 (list (devtools-sql--read-connection profile) profile)))
+  (pop-to-buffer (devtools-sql--start conn (or profile (devtools-current-profile)))))
 
 ;;;###autoload
-(defun devtools-sql-query (conn &optional name description)
-  "Open a query file of CONN in the current environment.
+(defun devtools-sql-query (conn &optional name description profile)
+  "Open a query file of CONN in PROFILE.
 Without NAME, the datasource's default file; with NAME, its file NAME,
-created if new, with DESCRIPTION as its first line.  Interactively, a
-prefix argument asks for NAME, and for DESCRIPTION if the file is new.
+created if new, with DESCRIPTION as its first line.  PROFILE defaults
+to the current environment; interactively, to
+`devtools-sql-command-profile'.  Interactively, a prefix argument asks
+for NAME, and for DESCRIPTION if the file is new.
 \\<devtools-sql-query-mode-map>\\[devtools-sql-run] runs the query at point, or the region."
   (interactive
-   (let* ((conn (devtools-sql--read-connection))
-          (profile (devtools-current-profile))
+   (let* ((profile (devtools-sql-command-profile))
+          (conn (devtools-sql--read-connection profile))
           (name (and current-prefix-arg (devtools-sql--read-query-name conn profile))))
      (list conn name
            (and name (not (file-exists-p (devtools-sql--query-file conn profile name)))
-                (read-string "Description (first line of the file): ")))))
-  (let* ((profile (devtools-current-profile))
+                (read-string "Description (first line of the file): "))
+           profile)))
+  (let* ((profile (or profile (devtools-current-profile)))
          (file (devtools-sql--query-file conn profile name))
          (created (and name description (not (string-blank-p description))
                        (not (file-exists-p file)))))
@@ -317,11 +345,12 @@ can be matched.  WITH-PROFILE puts the environment in front."
 
 ;;;###autoload
 (defun devtools-sql-find-file (&optional all)
-  "Open a query file of the current environment, found by name or description.
-The description is a file's first line, when it is a comment.  With a
-prefix argument ALL, look in every environment."
+  "Open a query file, found by name or description.
+It looks in the environment of `devtools-sql-command-profile', or in
+every environment with a prefix argument ALL.  The description is a
+file's first line, when it is a comment."
   (interactive "P")
-  (let* ((profiles (if all (mapcar #'car devtools-profiles) (list (devtools-current-profile))))
+  (let* ((profiles (if all (mapcar #'car devtools-profiles) (list (devtools-sql-command-profile))))
          (files (or (devtools-sql--query-files profiles)
                     (user-error "No datasources in %s"
                                 (if all "the profiles" (car profiles)))))
@@ -724,13 +753,14 @@ OTHER; `devtools-sql-query-files-use-session' swaps the two."
 (defun devtools-sql-run-string (query &optional other)
   "Run QUERY and show its rows.
 In a query file, like `devtools-sql-run' (OTHER is the prefix
-argument); elsewhere, on the pool of a connection of the current
-environment."
+argument); elsewhere, on the pool of a connection of the environment
+of `devtools-sql-command-profile'."
   (interactive (list (read-string "Query: ") current-prefix-arg))
   (if devtools-sql-connection
       (devtools-sql-execute devtools-sql-connection devtools-sql-profile query
                             (current-buffer) (devtools-sql--use-session-p other))
-    (devtools-sql-execute (devtools-sql--read-connection) (devtools-current-profile) query)))
+    (let ((profile (devtools-sql-command-profile)))
+      (devtools-sql-execute (devtools-sql--read-connection profile) profile query))))
 
 (defun devtools-sql-repl-for-buffer ()
   "Open the psql REPL for the connection of the current buffer."

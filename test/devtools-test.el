@@ -921,7 +921,7 @@
           (progn
             ;; The named file entry asks for a name, as C-u C-c d q would.
             (cl-letf (((symbol-function 'devtools-sql--read-connection)
-                       (lambda () (devtools-test--conn 'local "app")))
+                       (lambda (&rest _) (devtools-test--conn 'local "app")))
                       ((symbol-function 'completing-read) (lambda (&rest _) "report"))
                       ((symbol-function 'read-string) (lambda (&rest _) "Monthly revenue")))
               (with-current-buffer (save-window-excursion (devtools-sql-query-named))
@@ -943,5 +943,69 @@
   (dolist (command '(devtools-sql-query devtools-sql-query-named
                      devtools-sql-find-file devtools-sql-find-file-everywhere))
     (should (transient-get-suffix 'devtools-menu command))))
+
+;;; Commands follow the current buffer
+
+(ert-deftest devtools-test-command-profile ()
+  (devtools-test--with-profiles
+    ;; The current environment is local; buffers of prod say prod.
+    (should (eq (devtools-sql-command-profile) 'local))
+    (with-temp-buffer
+      (devtools-sql--mark-buffer (devtools-test--conn 'prod "writer") 'prod)
+      (should (eq (devtools-sql-command-profile) 'prod)))
+    (with-temp-buffer
+      (setq-local devtools-sql-result--info
+                  (list :profile 'prod :connection (devtools-test--conn 'prod "app")))
+      (should (eq (devtools-sql-command-profile) 'prod)))
+    ;; A buffer of an environment no longer in the profiles does not count.
+    (with-temp-buffer
+      (devtools-sql--mark-buffer '(:name "x") 'gone)
+      (should (eq (devtools-sql-command-profile) 'local)))))
+
+(ert-deftest devtools-test-read-connection-defaults-to-buffer ()
+  (devtools-test--with-profiles
+    (let (asked)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt _collection &rest args)
+                   (setq asked (list prompt (nth 4 args)))
+                   (nth 4 args))))
+        (with-temp-buffer
+          (devtools-sql--mark-buffer (devtools-test--conn 'prod "writer") 'prod)
+          (should (equal (plist-get (devtools-sql--read-connection) :name) "writer"))
+          (should (equal asked '("Datasource [prod] (default writer): " "writer")))
+          ;; Another environment than the buffer's: no default.
+          (setq devtools-profiles
+                (append devtools-profiles
+                        '((other :postgres ((:name "a") (:name "b"))))))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt &rest args) (setq asked (list prompt (nth 5 args))) "b")))
+            (should (equal (plist-get (devtools-sql--read-connection 'other) :name) "b"))
+            (should (equal asked '("Datasource [other]: " nil)))))))))
+
+(ert-deftest devtools-test-commands-follow-buffer ()
+  (devtools-test--with-profiles
+    (let ((devtools-sql-query-directory (make-temp-file "devtools-sql" t))
+          collection)
+      (unwind-protect
+          (with-temp-buffer
+            (devtools-sql--mark-buffer (devtools-test--conn 'prod "writer") 'prod)
+            ;; Finding looks in prod, though the current environment is local.
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt candidates &rest _)
+                         (setq collection (mapcar (lambda (c) (substring-no-properties (car c)))
+                                                  candidates))
+                         (car collection))))
+              (kill-buffer (save-window-excursion (devtools-sql-find-file))))
+            (should (equal collection '("app     (default file)" "writer  (default file)")))
+            ;; A named file goes to prod/writer, the buffer's datasource.
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (prompt collection &rest args)
+                         (if (string-prefix-p "Datasource" prompt) (nth 4 args) "fix")))
+                      ((symbol-function 'read-string) (lambda (&rest _) "")))
+              (with-current-buffer (save-window-excursion (devtools-sql-query-named))
+                (should (string-suffix-p "/prod/writer/fix.sql" buffer-file-name))
+                (should (eq devtools-sql-profile 'prod))
+                (kill-buffer))))
+        (delete-directory devtools-sql-query-directory t)))))
 
 ;;; devtools-test.el ends here

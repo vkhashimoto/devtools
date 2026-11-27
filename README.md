@@ -62,6 +62,10 @@ The rows show up as an aligned table in `*SQL Result: local/app*`.
 | `C-c d f` | Find a query file of the environment by name or description |
 | `C-c d F` | Find a query file of any environment |
 
+In a query file, a psql REPL or a result buffer, `p`, `q`, `n` and `f` use
+that buffer's environment rather than the current one, and `p`, `q` and `n`
+offer its datasource as the default (`RET` picks it).
+
 A prefix argument typed before `C-c d` does not reach the command you pick; type
 it inside the menu instead (`C-c d C-u q` is the same as `C-c d n`).
 

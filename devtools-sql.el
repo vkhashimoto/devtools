@@ -234,15 +234,20 @@ Files are named PROFILE/CONNECTION.sql; for `find-file-hook'."
 Each is called with the connection, the profile, and the command tags
 of the statements (such as \"CREATE TABLE\"), or nil if the run failed.")
 
-(defun devtools-sql--server-params (conn profile)
-  "Return the server's connection/open parameters for CONN in PROFILE."
+(defun devtools-sql--server-settings (conn profile)
+  "Return the server's connection settings for CONN in PROFILE.
+They are the connection/open parameters, the password aside."
   (list :driver "postgres"
         :host (or (plist-get conn :host) "")
         :port (or (plist-get conn :port) 0)
         :user (or (plist-get conn :user) "")
-        :password (or (devtools-sql--password conn) "")
         :database (or (plist-get conn :database) "")
         :readOnly (if (devtools-sql--read-only-p conn profile) t :json-false)))
+
+(defun devtools-sql--server-params (conn profile)
+  "Return the server's connection/open parameters for CONN in PROFILE."
+  (append (devtools-sql--server-settings conn profile)
+          (list :password (or (devtools-sql--password conn) ""))))
 
 (defun devtools-sql--server-id (conn profile)
   "Return the server's id for CONN in PROFILE."
@@ -439,6 +444,39 @@ only if the user agrees; otherwise the current connection stays."
                         devtools-sql--tx-status nil)
                   (force-mode-line-update)))
               (message "devtools: reopened %s (%s)" id changes))))))))
+
+(defun devtools-sql--report-profile-changes ()
+  "Report the open connections whose settings differ from the profiles.
+Nothing is reopened here: the next interactive run does that."
+  (let (reports)
+    (pcase-dolist (`(,id . ,params) (devtools-server-opened-connections))
+      (when (string-match "\\`\\([^/]+\\)/\\(.*\\)\\'" id)
+        (let* ((profile (intern (match-string 1 id)))
+               (name (match-string 2 id))
+               (conn (and (assq profile devtools-profiles)
+                          (seq-find (lambda (c) (equal (plist-get c :name) name))
+                                    (devtools-env :postgres profile)))))
+          (if (null conn)
+              (push (format "%s is no longer in the profiles (its connection stays open until the server stops)"
+                            id)
+                    reports)
+            (when-let* ((changes (devtools-sql--settings-changes
+                                  params (devtools-sql--server-settings conn profile))))
+              (push (format "%s settings changed (%s); the next run reopens it%s"
+                            id changes
+                            (if (devtools-sql--session-buffers id)
+                                ", asking first if a session holds state"
+                              ""))
+                    reports))))))
+    (when reports
+      (message "devtools: %s" (string-join (nreverse reports) "; ")))))
+
+(defun devtools-sql--profiles-watcher (_symbol _value operation _where)
+  "Report profile changes to open connections once `devtools-profiles' is set.
+OPERATION is the kind of change, see `add-variable-watcher'."
+  (when (eq operation 'set)
+    ;; Watchers run before the new value is in place.
+    (run-at-time 0 nil #'devtools-sql--report-profile-changes)))
 
 ;;; Running queries
 

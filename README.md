@@ -110,6 +110,14 @@ completion names:
   Answering no keeps the current connection, with its old settings, and asks
   again on the next run.
 
+With `devtools-mode` on, setting `devtools-profiles` (`C-M-x` on your profiles,
+loading them, Customize) reports at once which open connections it changes,
+without touching them:
+
+```
+devtools: local/app settings changed (read-only: off → on); the next run reopens it, asking first if a session holds state
+```
+
 Set `devtools-sql-query-files-use-session` to nil to run on the pool by
 default; `C-u` then picks the session.  The result buffer's header line says
 which one ran the query.  On a read-only connection, write with

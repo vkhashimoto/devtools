@@ -101,6 +101,14 @@ can close sessions, so it is left to `devtools-server-open'."
   (and (devtools-server-running-p)
        (gethash id devtools-server--opened)))
 
+(defun devtools-server-opened-connections ()
+  "Return the open connections as (ID . PARAMS) pairs."
+  (when (devtools-server-running-p)
+    (let (connections)
+      (maphash (lambda (id params) (push (cons id params) connections))
+               devtools-server--opened)
+      connections)))
+
 (defun devtools-server-call (method params)
   "Send METHOD with PARAMS to the server and wait for its result.
 Return (:result RESULT) or (:error ERROR), ERROR being a plist (:code

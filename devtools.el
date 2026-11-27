@@ -36,10 +36,13 @@ changing this to apply it."
 
 ;;;###autoload
 (define-minor-mode devtools-mode
-  "Show the current environment, apply window rules and link query files."
+  "Show the current environment, apply window rules and link query files.
+Also report when `devtools-profiles' changes the settings of an open
+connection."
   :global t
   :group 'devtools
   (remove-hook 'find-file-hook #'devtools-sql-link-query-file)
+  (remove-variable-watcher 'devtools-profiles #'devtools-sql--profiles-watcher)
   (setq display-buffer-alist
         (seq-remove (lambda (rule) (memq rule devtools--installed-display-rules))
                     display-buffer-alist)
@@ -50,6 +53,7 @@ changing this to apply it."
           display-buffer-alist (append devtools--installed-display-rules
                                        display-buffer-alist))
     (add-hook 'find-file-hook #'devtools-sql-link-query-file)
+    (add-variable-watcher 'devtools-profiles #'devtools-sql--profiles-watcher)
     (push devtools--mode-line-entry mode-line-misc-info)))
 
 (provide 'devtools)

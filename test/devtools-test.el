@@ -97,11 +97,13 @@
     (devtools-mode 1)
     (should (assoc "\\`\\*SQL\\( Result\\)?: " display-buffer-alist))
     (should (member devtools--mode-line-entry mode-line-misc-info))
+    (should (memq #'devtools-sql--profiles-watcher (get-variable-watchers 'devtools-profiles)))
     (devtools-mode 1)                   ; re-enabling must not duplicate
     (should (= (length display-buffer-alist) 2))
     (devtools-mode -1)
     (should (equal display-buffer-alist '(("other" display-buffer-same-window))))
-    (should-not mode-line-misc-info)))
+    (should-not mode-line-misc-info)
+    (should-not (memq #'devtools-sql--profiles-watcher (get-variable-watchers 'devtools-profiles)))))
 
 ;;; Result buffer
 
@@ -696,5 +698,40 @@
                     (devtools-test--wait-for-schema conn 'local)))
       (should (eq (plist-get (devtools-server-opened-params "local/app") :readOnly) :json-false))
       (should (equal devtools-sql--tx-status "transaction")))))
+
+(defun devtools-test--messages-after (thunk)
+  "Call THUNK, let timers run, and return the messages shown meanwhile."
+  (let (messages)
+    (cl-letf (((symbol-function 'message)
+               (lambda (format &rest args)
+                 (when format (push (apply #'format-message format args) messages)))))
+      (funcall thunk)
+      (accept-process-output nil 0.1))
+    (nreverse messages)))
+
+(ert-deftest devtools-test-postgres-profile-watcher ()
+  (skip-unless (devtools-test--server-p))
+  (devtools-test--with-query-file
+    (devtools-test--run "select 1")
+    (let ((devtools-mode-was devtools-mode))
+      (unwind-protect
+          (progn
+            (devtools-mode 1)
+            ;; Nothing relevant changed: quiet.
+            (should-not (seq-find (lambda (m) (string-prefix-p "devtools:" m))
+                                  (devtools-test--messages-after
+                                   (lambda () (setq devtools-profiles (copy-tree devtools-profiles))))))
+            (let ((messages (devtools-test--messages-after
+                             (lambda () (devtools-test--change-local-app :read-only t)))))
+              (should (member "devtools: local/app settings changed (read-only: off → on); the next run reopens it, asking first if a session holds state"
+                              messages)))
+            ;; The connection itself was not touched.
+            (should (eq (plist-get (devtools-server-opened-params "local/app") :readOnly) :json-false))
+            (let ((messages (devtools-test--messages-after
+                             (lambda () (setq devtools-profiles
+                                              (assq-delete-all 'local (copy-tree devtools-profiles)))))))
+              (should (seq-find (lambda (m) (string-match-p "local/app is no longer in the profiles" m))
+                                messages))))
+        (unless devtools-mode-was (devtools-mode -1))))))
 
 ;;; devtools-test.el ends here

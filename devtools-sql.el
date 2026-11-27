@@ -17,6 +17,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'sql)
 (require 'auth-source)
 (require 'pulse)
@@ -193,20 +194,30 @@ or \"failed\", or nil before its first run.")
   (pop-to-buffer (devtools-sql--start conn (devtools-current-profile))))
 
 ;;;###autoload
-(defun devtools-sql-query (conn &optional name)
+(defun devtools-sql-query (conn &optional name description)
   "Open a query file of CONN in the current environment.
 Without NAME, the datasource's default file; with NAME, its file NAME,
-created if new.  Interactively, a prefix argument asks for NAME.
+created if new, with DESCRIPTION as its first line.  Interactively, a
+prefix argument asks for NAME, and for DESCRIPTION if the file is new.
 \\<devtools-sql-query-mode-map>\\[devtools-sql-run] runs the query at point, or the region."
   (interactive
-   (let ((conn (devtools-sql--read-connection)))
-     (list conn (and current-prefix-arg
-                     (devtools-sql--read-query-name conn (devtools-current-profile))))))
+   (let* ((conn (devtools-sql--read-connection))
+          (profile (devtools-current-profile))
+          (name (and current-prefix-arg (devtools-sql--read-query-name conn profile))))
+     (list conn name
+           (and name (not (file-exists-p (devtools-sql--query-file conn profile name)))
+                (read-string "Description (first line of the file): ")))))
   (let* ((profile (devtools-current-profile))
-         (file (devtools-sql--query-file conn profile name)))
+         (file (devtools-sql--query-file conn profile name))
+         (created (and name description (not (string-blank-p description))
+                       (not (file-exists-p file)))))
     (make-directory (file-name-directory file) t)
+    (when created
+      (write-region (format "-- %s\n\n" (string-trim description)) nil file nil 'silent))
     (prog1 (find-file file)
-      (devtools-sql--link-query-buffer conn profile name))))
+      (devtools-sql--link-query-buffer conn profile name)
+      (when created
+        (goto-char (point-max))))))
 
 (defun devtools-sql--query-file (conn profile &optional name)
   "Return the query file of CONN in PROFILE.
@@ -260,6 +271,68 @@ Files are PROFILE/CONNECTION.sql or PROFILE/CONNECTION/NAME.sql; for
                               (devtools-env :postgres profile))))
     (devtools-sql--link-query-buffer conn profile
                                      (and (length= parts 3) (file-name-base (nth 2 parts))))))
+
+(defun devtools-sql--file-description (file)
+  "Return the description of the query FILE: its first line, if a comment."
+  (with-temp-buffer
+    (insert-file-contents file nil 0 4096)
+    (goto-char (point-min))
+    (when (looking-at "[ \t]*--+[ \t]*\\(.*?\\)[ \t]*$")
+      (let ((text (match-string 1)))
+        (unless (string-empty-p text) text)))))
+
+(defun devtools-sql--query-files (profiles)
+  "Return the query files of the datasources of PROFILES.
+Each is a list (FILE PROFILE CONN NAME), NAME being nil for a
+datasource's default file."
+  (let (files)
+    (dolist (profile profiles)
+      (dolist (conn (devtools-env :postgres profile))
+        (let ((default (devtools-sql--query-file conn profile)))
+          (when (file-exists-p default)
+            (push (list default profile conn nil) files)))
+        (dolist (name (devtools-sql--query-names conn profile))
+          (push (list (devtools-sql--query-file conn profile name) profile conn name)
+                files))))
+    (nreverse files)))
+
+(defun devtools-sql--find-file-candidates (files with-profile)
+  "Return completion candidates for FILES, as (CANDIDATE . FILE) pairs.
+A candidate is the file's name followed by its description, so both
+can be matched.  WITH-PROFILE puts the environment in front."
+  (let* ((labels (mapcar (pcase-lambda (`(,_ ,profile ,conn ,name))
+                           (concat (if with-profile (format "%s/" profile) "")
+                                   (plist-get conn :name)
+                                   (if name (concat "/" name) "")))
+                         files))
+         (width (apply #'max (mapcar #'length labels))))
+    (cl-mapcar (lambda (label file)
+                 (let ((description (or (devtools-sql--file-description (car file))
+                                        (and (null (nth 3 file)) "(default file)"))))
+                   (cons (if description
+                             (concat label (make-string (- width (length label)) ?\s) "  "
+                                     (propertize description 'face 'completions-annotations))
+                           label)
+                         file)))
+               labels files)))
+
+;;;###autoload
+(defun devtools-sql-find-file (&optional all)
+  "Open a query file of the current environment, found by name or description.
+The description is a file's first line, when it is a comment.  With a
+prefix argument ALL, look in every environment."
+  (interactive "P")
+  (let* ((profiles (if all (mapcar #'car devtools-profiles) (list (devtools-current-profile))))
+         (files (or (devtools-sql--query-files profiles)
+                    (user-error "No query files yet; %s creates one"
+                                (substitute-command-keys "\\[devtools-sql-query]"))))
+         (candidates (devtools-sql--find-file-candidates files all))
+         (choice (completing-read (if all "Query file: "
+                                    (format "Query file [%s]: " (car profiles)))
+                                  candidates nil t)))
+    (pcase-let ((`(,file ,profile ,conn ,name) (cdr (assoc choice candidates))))
+      (prog1 (find-file file)
+        (devtools-sql--link-query-buffer conn profile name)))))
 
 ;;; Running queries into a result buffer
 

@@ -808,4 +808,90 @@
             (kill-buffer buffer)))
         (delete-directory devtools-sql-query-directory t)))))
 
+;;; Descriptions and finding query files
+
+(defun devtools-test--write (file text)
+  (make-directory (file-name-directory file) t)
+  (write-region text nil file nil 'silent))
+
+(ert-deftest devtools-test-file-description ()
+  (let ((file (make-temp-file "devtools-desc" nil ".sql")))
+    (unwind-protect
+        (progn
+          (devtools-test--write file "--  Monthly revenue  \nselect 1;\n")
+          (should (equal (devtools-sql--file-description file) "Monthly revenue"))
+          (devtools-test--write file "---Cleanup\n")
+          (should (equal (devtools-sql--file-description file) "Cleanup"))
+          (devtools-test--write file "select 1; -- not a description\n")
+          (should-not (devtools-sql--file-description file))
+          (devtools-test--write file "--\nselect 1;\n")
+          (should-not (devtools-sql--file-description file))
+          (devtools-test--write file "")
+          (should-not (devtools-sql--file-description file)))
+      (delete-file file))))
+
+(ert-deftest devtools-test-new-query-file-gets-description ()
+  (devtools-test--with-profiles
+    (let ((devtools-sql-query-directory (make-temp-file "devtools-sql" t))
+          (conn (devtools-test--conn 'local "app")))
+      (unwind-protect
+          (let ((buffer (save-window-excursion (devtools-sql-query conn "report" "Monthly revenue"))))
+            (with-current-buffer buffer
+              (should (equal (buffer-string) "-- Monthly revenue\n\n"))
+              (should (eobp))
+              (kill-buffer))
+            ;; An existing file keeps its first line.
+            (setq buffer (save-window-excursion (devtools-sql-query conn "report" "Something else")))
+            (with-current-buffer buffer
+              (should (equal (buffer-string) "-- Monthly revenue\n\n"))
+              (kill-buffer)))
+        (delete-directory devtools-sql-query-directory t)))))
+
+(ert-deftest devtools-test-find-query-file ()
+  (devtools-test--with-profiles
+    (let* ((devtools-sql-query-directory (make-temp-file "devtools-sql" t))
+           (app (devtools-test--conn 'local "app"))
+           (writer (devtools-test--conn 'prod "writer"))
+           collection)
+      (unwind-protect
+          (progn
+            (devtools-test--write (devtools-sql--query-file app 'local) "select 1;\n")
+            (devtools-test--write (devtools-sql--query-file app 'local "cleanup")
+                                  "-- Delete orphaned sessions older than 30 days\n")
+            (devtools-test--write (devtools-sql--query-file app 'local "report") "select 2;\n")
+            (devtools-test--write (devtools-sql--query-file writer 'prod "fix") "-- Fix totals\n")
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt candidates &rest _)
+                         (setq collection (mapcar (lambda (c) (substring-no-properties (car c)))
+                                                  candidates))
+                         ;; Pick the file whose description mentions "orphaned".
+                         (seq-find (lambda (c) (string-match-p "orphaned" c)) collection))))
+              (let ((buffer (save-window-excursion (devtools-sql-find-file))))
+                (should (equal collection
+                               '("app          (default file)"
+                                 "app/cleanup  Delete orphaned sessions older than 30 days"
+                                 "app/report")))
+                (with-current-buffer buffer
+                  (should (string-suffix-p "/local/app/cleanup.sql" buffer-file-name))
+                  (should devtools-sql-query-mode)
+                  (should (equal devtools-sql-query-name "cleanup"))
+                  (kill-buffer))))
+            ;; Every environment, prefixed with its name.
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt candidates &rest _)
+                         (setq collection (mapcar (lambda (c) (substring-no-properties (car c)))
+                                                  candidates))
+                         (car collection))))
+              (kill-buffer (save-window-excursion (devtools-sql-find-file t)))
+              (should (member "prod/writer/fix    Fix totals" collection))
+              (should (member "local/app/report" collection))))
+        (delete-directory devtools-sql-query-directory t)))))
+
+(ert-deftest devtools-test-find-query-file-without-files ()
+  (devtools-test--with-profiles
+    (let ((devtools-sql-query-directory (make-temp-file "devtools-sql" t)))
+      (unwind-protect
+          (should-error (devtools-sql-find-file) :type 'user-error)
+        (delete-directory devtools-sql-query-directory t)))))
+
 ;;; devtools-test.el ends here

@@ -59,12 +59,25 @@ The rows show up as an aligned table in `*SQL Result: local/app*`.
 | `C-c d p` | psql REPL for a connection                        |
 | `C-c d q` | Default query file of a datasource                |
 | `C-u C-c d q` | Another query file of a datasource, by name (new or existing) |
+| `C-c d f` | Find a query file of the environment by name or description (`C-u`: every environment) |
 
 Each datasource (an entry under `:postgres`) has a default query file,
 `<environment>/<datasource>.sql`, and as many named ones as you like,
 `<environment>/<datasource>/<name>.sql`, all under
 `devtools-sql-query-directory`.  Each file has its own session and its own
 result buffer (`*SQL Result: prod/app*`, `*SQL Result: prod/app/cleanup*`).
+
+A file's **description** is its first line when that is a comment.  A new named
+file asks for one and writes it there (`-- Monthly revenue by customer`); edit
+that line to change it.  `C-c d f` lists the files with their descriptions,
+so any word of either finds a file:
+
+```
+Query file [prod]:
+app          (default file)
+app/cleanup  Delete orphaned sessions older than 30 days
+app/report   Monthly revenue by customer
+```
 
 In a query file (`devtools-sql-query-mode`):
 

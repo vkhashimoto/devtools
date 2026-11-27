@@ -24,7 +24,8 @@
     ("e" "Switch" devtools-switch-profile :transient t)]
    ["Postgres"
     ("p" "REPL" devtools-sql-connect)
-    ("q" "Query file" devtools-sql-query)]])
+    ("q" "Query file" devtools-sql-query)
+    ("f" "Find query file" devtools-sql-find-file)]])
 
 (provide 'devtools-menu)
 ;;; devtools-menu.el ends here

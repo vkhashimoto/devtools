@@ -145,6 +145,7 @@ like LSP (`Content-Length` headers).  Methods so far:
 | `session/open`     | Open a session on a connection: a connection of its own, with the pool's settings |
 | `session/close`    | Close a session                                            |
 | `query/execute`    | Run SQL on the pool, or on a session; every statement's columns, rows (text, NULL as null) or command tag, plus `txStatus` (idle, transaction, failed) for sessions |
+| `schema/describe`  | Tables and views of a connection, with their columns and types, for completion |
 
 Errors carry Postgres' SQLSTATE, detail, hint and position in `data` (and
 `txStatus` for sessions).  A session runs one query at a time (a second one

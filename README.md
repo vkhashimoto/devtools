@@ -79,32 +79,6 @@ state across runs, use the REPL.
 NULL shows as `[NULL]`, distinct from an empty string, and errors show the
 failing line with a caret, plus Postgres' detail and hint.
 
-## devtools-server
-
-Emacs and the server talk JSON-RPC 2.0 over the server's stdin/stdout, framed
-like LSP (`Content-Length` headers).  Methods so far:
-
-| Method             | Purpose                                                    |
-|--------------------|------------------------------------------------------------|
-| `initialize`       | Server name, version and drivers                           |
-| `connection/open`  | Open (or replace) a pool: driver, host, port, user, password, database, readOnly, poolSize; closes its sessions |
-| `connection/close` | Close a pool and its sessions                              |
-| `session/open`     | Open a session on a connection: a connection of its own, with the pool's settings |
-| `session/close`    | Close a session                                            |
-| `query/execute`    | Run SQL on the pool, or on a session; every statement's columns, rows (text, NULL as null) or command tag, plus `txStatus` (idle, transaction, failed) for sessions |
-
-Errors carry Postgres' SQLSTATE, detail, hint and position in `data` (and
-`txStatus` for sessions).  A session runs one query at a time (a second one
-gets a "busy" error); one whose connection dies is reported lost, never
-silently replaced.
-
-| Command                        | What it does                                   |
-|--------------------------------|------------------------------------------------|
-| `M-x devtools-server-events`   | Show the JSON-RPC messages exchanged           |
-| `M-x devtools-server-stop`     | Stop the server, closing every connection; the next query starts it again |
-
-The server's own log is in `*devtools-server stderr*`.
-
 ### Completion
 
 Tables and columns load in the background when a query file opens (cached per
@@ -142,6 +116,32 @@ In a result buffer (`devtools-sql-result-mode`):
 
 NULL shows as `[NULL]`, an empty string as an empty cell.  Org tables cannot
 hold `|` or newlines, so those show (and copy) as `¦` and `↵`.
+
+## devtools-server
+
+Emacs and the server talk JSON-RPC 2.0 over the server's stdin/stdout, framed
+like LSP (`Content-Length` headers).  Methods so far:
+
+| Method             | Purpose                                                    |
+|--------------------|------------------------------------------------------------|
+| `initialize`       | Server name, version and drivers                           |
+| `connection/open`  | Open (or replace) a pool: driver, host, port, user, password, database, readOnly, poolSize; closes its sessions |
+| `connection/close` | Close a pool and its sessions                              |
+| `session/open`     | Open a session on a connection: a connection of its own, with the pool's settings |
+| `session/close`    | Close a session                                            |
+| `query/execute`    | Run SQL on the pool, or on a session; every statement's columns, rows (text, NULL as null) or command tag, plus `txStatus` (idle, transaction, failed) for sessions |
+
+Errors carry Postgres' SQLSTATE, detail, hint and position in `data` (and
+`txStatus` for sessions).  A session runs one query at a time (a second one
+gets a "busy" error); one whose connection dies is reported lost, never
+silently replaced.
+
+| Command                        | What it does                                   |
+|--------------------------------|------------------------------------------------|
+| `M-x devtools-server-events`   | Show the JSON-RPC messages exchanged           |
+| `M-x devtools-server-stop`     | Stop the server, closing every connection; the next query starts it again |
+
+The server's own log is in `*devtools-server stderr*`.
 
 ## Customizing
 

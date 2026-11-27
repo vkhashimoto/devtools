@@ -169,8 +169,9 @@ Return its (SHOWN-ROWS . TOTAL-ROWS)."
                         (plist-get set :columns)))
         (rows (mapcar (lambda (row) (mapcar #'devtools-sql-result--cell-text row))
                       (plist-get set :rows))))
-    (insert (orgtbl-to-orgtbl (append (list header 'hline) rows) nil) "\n")
-    (goto-char (point-min))
+    (let ((start (point)))
+      (insert (orgtbl-to-orgtbl (append (list header 'hline) rows) nil) "\n")
+      (goto-char start))
     (org-table-align)
     (while (re-search-forward "\\[NULL\\]" nil t)
       (let ((overlay (make-overlay (match-beginning 0) (match-end 0))))
@@ -301,16 +302,23 @@ ELAPSED is in seconds."
             (if (equal value "[NULL]") devtools-sql-result-copy-null-as value))
           (devtools-sql-result--row-fields)))
 
+(defun devtools-sql-result--goto-table ()
+  "Move to the first line of the result table; return nil if there is none."
+  (goto-char (point-min))
+  (when (re-search-forward "^|" nil t)
+    (forward-line 0)
+    t))
+
 (defun devtools-sql-result--each-row (function)
   "Call FUNCTION with the row number, with point on each table row in turn."
   (save-excursion
-    (goto-char (point-min))
-    (let ((row 0))
-      (while (org-at-table-p)
-        (unless (org-at-table-hline-p)
-          (setq row (1+ row))
-          (save-excursion (funcall function row)))
-        (forward-line 1)))))
+    (when (devtools-sql-result--goto-table)
+      (let ((row 0))
+        (while (org-at-table-p)
+          (unless (org-at-table-hline-p)
+            (setq row (1+ row))
+            (save-excursion (funcall function row)))
+          (forward-line 1))))))
 
 ;;; Marking
 
@@ -455,7 +463,8 @@ double quote.  Double quotes inside a quoted value are doubled."
   "Copy ROWS, a list of lists of cell values, as delimited lines.
 With `devtools-sql-result-copy-header' set, start with the names of COLUMNS."
   (when devtools-sql-result-copy-header
-    (let ((names (save-excursion (goto-char (point-min)) (devtools-sql-result--row-fields))))
+    (let ((names (save-excursion (devtools-sql-result--goto-table)
+                                 (devtools-sql-result--row-fields))))
       (push (mapcar (lambda (column) (nth (1- column) names)) columns) rows)))
   ;; A row of one cell has no delimiter to clash with, so it stays as is.
   (kill-new (mapconcat (lambda (row)
@@ -678,8 +687,9 @@ SELECT FOR UPDATE make it a write.  When unsure, it is not a read."
                 (devtools-sql-result--each-row (lambda (_row) (setq lines (1+ lines))))
                 (cons (max 0 (1- lines))
                       (save-excursion
-                        (goto-char (point-min))
-                        (if (org-at-table-p) (length (devtools-sql-result--row-fields)) 0)))))
+                        (if (devtools-sql-result--goto-table)
+                            (length (devtools-sql-result--row-fields))
+                          0)))))
         ;; One margin column, for the flag on rows that have marked cells.
         (setq-local left-margin-width 1)
         (dolist (window (get-buffer-window-list nil nil t))

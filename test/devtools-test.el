@@ -1132,4 +1132,22 @@
       (should-error (devtools-sql-result-rerun) :type 'user-error)
       (should-not ran))))
 
+(ert-deftest devtools-test-result-table-below-other-text ()
+  ;; The table code finds the table wherever it starts.
+  (devtools-test--with-result
+      (devtools-test--response
+       (devtools-test--table '("id" "customer") '(("1" "acme") ("2" "globex"))))
+    (let ((inhibit-read-only t))
+      (goto-char (point-min))
+      (insert "select id, customer from orders\n\n"))
+    (devtools-sql-result-mode 1)
+    (should (equal devtools-sql-result--table-size '(2 . 2)))
+    (let ((kill-ring nil)
+          (devtools-sql-result-copy-header t)
+          (devtools-sql-result-copy-delimiter "\t"))
+      (search-forward "acme")
+      (devtools-sql-result-mark-whole-column)
+      (devtools-sql-result-copy)
+      (should (equal (car kill-ring) "customer\nacme\nglobex")))))
+
 ;;; devtools-test.el ends here

@@ -62,19 +62,34 @@ In a query file (`devtools-sql-query-mode`):
 
 | Key         | Action                                                       |
 |-------------|--------------------------------------------------------------|
-| `C-c C-c`   | Run the query at point (blank-line separated), or the region |
+| `C-c C-c`   | Run the query at point (blank-line separated), or the region, on the file's session |
+| `C-u C-c C-c` | The same, on the connection pool                           |
 | `C-c C-z`   | psql REPL for this file's connection                         |
-| `M-x devtools-sql-run-string` | Type a query and run it                    |
+| `M-x devtools-sql-run-string` | Type a query and run it (outside a query file: pick a connection; runs on the pool) |
 | `C-M-i`     | Complete table and column names (corfu, company, etc.)       |
 | `M-x devtools-sql-refresh-schema` | Reload the names offered for completion |
 
-Queries run on a connection pool kept by devtools-server; with several
-statements, the result of the last one is shown.  Each run is stateless: the
-connection is reset (`DISCARD ALL`) before going back to the pool, so `SET`,
-temp tables and read-only changes last for that run only, and a transaction
-left open is rolled back.  Within one run they work as usual; to write on a
-read-only connection, use `BEGIN READ WRITE; ...; COMMIT;` in one run.  For
-state across runs, use the REPL.
+Queries run through devtools-server; with several statements, the result of
+the last one is shown.
+
+- **Session** (default): each query file has a connection of its own, opened on
+  its first run and closed when the buffer is killed.  `SET`, temp tables and
+  transactions carry over between runs, like a psql session; the header lines
+  show "in transaction" or "transaction failed", so an open transaction on
+  prod is hard to miss.  A session runs one query at a time: while it is busy,
+  `C-c C-c` refuses and `C-u C-c C-c` runs on the pool instead.  If the server
+  stops, or the connection is reopened with other settings (profile changed),
+  the session and its state are gone; the next run says so and starts a new
+  one.
+- **Pool**: each run borrows a connection, which is reset (`DISCARD ALL`)
+  before going back, so `SET`, temp tables and read-only changes last for that
+  run only, and a transaction left open is rolled back.
+
+Set `devtools-sql-query-files-use-session` to nil to run on the pool by
+default; `C-u` then picks the session.  The result buffer's header line says
+which one ran the query.  On a read-only connection, write with
+`BEGIN READ WRITE; ...; COMMIT;` in one run (or, in a session, `SET
+default_transaction_read_only = off`, which lasts for that session).
 
 NULL shows as `[NULL]`, distinct from an empty string, and errors show the
 failing line with a caret, plus Postgres' detail and hint.
@@ -150,6 +165,7 @@ The server's own log is in `*devtools-server stderr*`.
 - `devtools-profiles`: environments and their connections.
 - `devtools-display-rules`: where devtools buffers open (`display-buffer-alist` format).
 - `devtools-sql-read-only-in-production`: production sessions start read-only.
+- `devtools-sql-query-files-use-session`: query files run on a session (default) or the pool.
 - `devtools-sql-query-directory`: where query files are saved.
 - `devtools-sql-result-max-rows`: rows shown in a result buffer (default 1000).
 - `devtools-sql-result-copy-delimiter`, `-copy-header`, `-copy-null-as`: copy defaults.

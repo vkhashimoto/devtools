@@ -81,7 +81,8 @@
 
 (defvar-local devtools-sql-result--info nil
   "Plist describing the result: :connection :profile :sql :state :run
-:elapsed :statements :shown-rows :total-rows.")
+:target (`session' or `pool') :tx :elapsed :statements :shown-rows
+:total-rows.")
 (put 'devtools-sql-result--info 'permanent-local t)
 
 (defvar-local devtools-sql-result--marks nil
@@ -263,10 +264,18 @@ ELAPSED is in seconds."
                              (format "%d rows" total)))
                          (format "  %.2fs" (or (plist-get info :elapsed) 0))
                          (when (> statements 1)
-                           (funcall off (format "  (last of %d results)" statements)))))))))
+                           (funcall off (format "  (last of %d results)" statements))))))))
+         (target
+          (pcase (plist-get info :target)
+            ('pool (funcall off "  pool"))
+            ('session
+             (concat (funcall off "  session")
+                     (pcase (plist-get info :tx)
+                       ("transaction" (propertize " · in transaction" 'face 'warning))
+                       ("failed" (propertize " · transaction failed" 'face 'error))))))))
     (concat
      (devtools-profile-label (plist-get info :profile))
-     " " (plist-get connection :name) "  " summary
+     " " (plist-get connection :name) "  " summary target
      (when (and devtools-sql-result-mode
                 (> (or (cdr devtools-sql-result--table-size) 0) 0))
        (let ((rows (length (delete-dups (delq 1 (mapcar #'car devtools-sql-result--marks)))))

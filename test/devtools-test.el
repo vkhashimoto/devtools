@@ -305,6 +305,11 @@
       (should (eq (devtools-test--wait-for-result (funcall result-buffer)) 'failed))
       (should (string-match-p "read-only transaction"
                               (with-current-buffer (funcall result-buffer) (buffer-string))))
+      ;; Reopening the connection with other settings closed its sessions.
+      (save-window-excursion (devtools-sql-run-string "update orders set status = status"))
+      (should (eq (devtools-test--wait-for-result (funcall result-buffer)) 'failed))
+      (should (string-match-p "Run again to start a new session"
+                              (with-current-buffer (funcall result-buffer) (buffer-string))))
       (save-window-excursion (devtools-sql-run-string "update orders set status = status"))
       (should (eq (devtools-test--wait-for-result (funcall result-buffer)) 'done))
       (should (equal (with-current-buffer (funcall result-buffer) (buffer-string))
@@ -313,9 +318,10 @@
 (ert-deftest devtools-test-postgres-rerun-discards-stale-result ()
   (skip-unless (devtools-test--server-p))
   (devtools-test--with-query-file
+    ;; On the pool; a session would refuse the second query as busy.
     (save-window-excursion
-      (devtools-sql-run-string "select pg_sleep(2), 'slow' as which")
-      (devtools-sql-run-string "select 'fast' as which"))
+      (devtools-sql-run-string "select pg_sleep(2), 'slow' as which" t)
+      (devtools-sql-run-string "select 'fast' as which" t))
     (let ((result (get-buffer "*SQL Result: local/app*")))
       (should (eq (devtools-test--wait-for-result result) 'done))
       (accept-process-output nil 0.3)
@@ -467,5 +473,136 @@
           (devtools-test--wait-for-result (funcall result))
           (should-not (devtools-sql-schema--find-table
                        (devtools-test--wait-for-schema conn 'local) "devtools_tmp")))))))
+
+;;; Sessions
+
+(ert-deftest devtools-test-use-session-p ()
+  (let ((devtools-sql-query-files-use-session t))
+    (should (devtools-sql--use-session-p nil))
+    (should-not (devtools-sql--use-session-p '(4))))
+  (let ((devtools-sql-query-files-use-session nil))
+    (should-not (devtools-sql--use-session-p nil))
+    (should (devtools-sql--use-session-p '(4)))))
+
+(ert-deftest devtools-test-session-header-lines ()
+  (devtools-test--with-profiles
+    (with-temp-buffer
+      (devtools-sql--mark-buffer (devtools-test--conn 'local "app") 'local)
+      (should-not (string-match-p "transaction" (devtools-sql--header-line)))
+      (setq devtools-sql--tx-status "transaction")
+      (should (string-match-p "in transaction" (devtools-sql--header-line)))
+      (setq devtools-sql--tx-status "failed")
+      (should (string-match-p "transaction failed" (devtools-sql--header-line)))))
+  (devtools-test--with-result (devtools-test--response (devtools-test--table '("n") '(("1"))))
+    (setq devtools-sql-result--info (plist-put devtools-sql-result--info :target 'pool))
+    (should (string-match-p "  pool" (devtools-sql-result--header-line)))
+    (setq devtools-sql-result--info (plist-put (plist-put devtools-sql-result--info :target 'session)
+                                               :tx "transaction"))
+    (should (string-match-p "session · in transaction" (devtools-sql-result--header-line)))))
+
+(defun devtools-test--server-call (method params)
+  "Send METHOD with PARAMS to the server and wait; return (RESULT . ERROR)."
+  (let (reply)
+    (devtools-server-request method params (lambda (result error) (setq reply (cons result error))))
+    (let ((deadline (+ (float-time) 10)))
+      (while (and (not reply) (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    reply))
+
+(defun devtools-test--run (query &optional other)
+  "Run QUERY in the current query buffer, wait, and return the result buffer."
+  (save-window-excursion (devtools-sql-run-string query other))
+  (let ((result (get-buffer "*SQL Result: local/app*")))
+    (devtools-test--wait-for-result result)
+    result))
+
+(defun devtools-test--result-text (buffer)
+  (with-current-buffer buffer (buffer-string)))
+
+(defun devtools-test--result-header (buffer)
+  (with-current-buffer buffer (devtools-sql-result--header-line)))
+
+(ert-deftest devtools-test-postgres-session-keeps-state ()
+  (skip-unless (devtools-test--server-p))
+  (devtools-test--with-query-file
+    (let ((result (devtools-test--run "begin")))
+      (should (string-match-p "session · in transaction" (devtools-test--result-header result)))
+      (should (equal devtools-sql--tx-status "transaction"))
+      (should (string-match-p "in transaction" (devtools-sql--header-line)))
+      (devtools-test--run "create temp table notes (x int); insert into notes values (7)")
+      ;; The session sees its uncommitted temp table; a pooled run does not.
+      (should (string-match-p "| 7 |" (devtools-test--result-text (devtools-test--run "select x from notes"))))
+      (setq result (devtools-test--run "select x from notes" t))
+      (should (eq (plist-get (buffer-local-value 'devtools-sql-result--info result) :state) 'failed))
+      (should (string-match-p "  pool" (devtools-test--result-header result)))
+      ;; An error fails the transaction, and both header lines say so.
+      (setq result (devtools-test--run "select nope"))
+      (should (string-match-p "transaction failed" (devtools-test--result-header result)))
+      (should (equal devtools-sql--tx-status "failed"))
+      (devtools-test--run "rollback")
+      (should (equal devtools-sql--tx-status "idle"))
+      (should-not (string-match-p "transaction" (devtools-sql--header-line))))))
+
+(ert-deftest devtools-test-postgres-session-busy ()
+  (skip-unless (devtools-test--server-p))
+  (devtools-test--with-query-file
+    (save-window-excursion (devtools-sql-run-string "select pg_sleep(1)"))
+    ;; The session is busy: refused at once, the running query is kept.
+    (should-error (devtools-sql-run-string "select 1") :type 'user-error)
+    (should (eq (plist-get (buffer-local-value 'devtools-sql-result--info
+                                               (get-buffer "*SQL Result: local/app*"))
+                           :state)
+                'running))
+    (let ((result (get-buffer "*SQL Result: local/app*")))
+      (should (eq (devtools-test--wait-for-result result) 'done))
+      (should (string-match-p "pg_sleep" (devtools-test--result-text result))))
+    ;; Free again.
+    (should (eq (plist-get (buffer-local-value 'devtools-sql-result--info
+                                               (devtools-test--run "select 1"))
+                           :state)
+                'done))))
+
+(ert-deftest devtools-test-postgres-session-closes-with-buffer ()
+  (skip-unless (devtools-test--server-p))
+  (let (session)
+    (devtools-test--with-query-file
+      (devtools-test--run "select 1")
+      (setq session (cdr devtools-sql--session))
+      (should session))
+    ;; The macro killed the query buffer, which closed its session.
+    (let ((reply (devtools-test--server-call "query/execute" (list :session session :sql "select 1"))))
+      (should (eq (plist-get (cdr reply) :code) -32003)))))
+
+(ert-deftest devtools-test-postgres-session-after-server-stop ()
+  (skip-unless (devtools-test--server-p))
+  (devtools-test--with-query-file
+    (devtools-test--run "create temp table notes (x int)")
+    (devtools-server-stop)
+    ;; A new session: the temp table is gone.
+    (let ((result (devtools-test--run "select * from notes")))
+      (should (string-match-p "relation \"notes\" does not exist" (devtools-test--result-text result))))
+    (should (eql (car devtools-sql--session) (devtools-server-generation)))))
+
+(ert-deftest devtools-test-postgres-session-lost ()
+  (skip-unless (devtools-test--server-p))
+  (devtools-test--with-query-file
+    (let* ((result (devtools-test--run "select pg_backend_pid()"))
+           (pid (with-current-buffer result
+                  (goto-char (point-min)) (forward-line 2)
+                  (string-trim (cadr (split-string (thing-at-point 'line t) "|"))))))
+      (devtools-test--run (format "select pg_terminate_backend(%s)" pid) t)
+      (setq result (devtools-test--run "select 1"))
+      (should (string-match-p "Run again to start a new session" (devtools-test--result-text result)))
+      (should-not devtools-sql--session)
+      (setq result (devtools-test--run "select 'again' as state"))
+      (should (string-match-p "again" (devtools-test--result-text result))))))
+
+(ert-deftest devtools-test-postgres-pool-by-default-when-sessions-off ()
+  (skip-unless (devtools-test--server-p))
+  (devtools-test--with-query-file
+    (let ((devtools-sql-query-files-use-session nil))
+      (should (string-match-p "  pool" (devtools-test--result-header (devtools-test--run "select 1"))))
+      (should-not devtools-sql--session)
+      (should (string-match-p "  session" (devtools-test--result-header (devtools-test--run "select 1" t)))))))
 
 ;;; devtools-test.el ends here

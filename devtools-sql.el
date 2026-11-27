@@ -284,13 +284,11 @@ Files are PROFILE/CONNECTION.sql or PROFILE/CONNECTION/NAME.sql; for
 (defun devtools-sql--query-files (profiles)
   "Return the query files of the datasources of PROFILES.
 Each is a list (FILE PROFILE CONN NAME), NAME being nil for a
-datasource's default file."
+datasource's default file, which is listed even before it exists."
   (let (files)
     (dolist (profile profiles)
       (dolist (conn (devtools-env :postgres profile))
-        (let ((default (devtools-sql--query-file conn profile)))
-          (when (file-exists-p default)
-            (push (list default profile conn nil) files)))
+        (push (list (devtools-sql--query-file conn profile) profile conn nil) files)
         (dolist (name (devtools-sql--query-names conn profile))
           (push (list (devtools-sql--query-file conn profile name) profile conn name)
                 files))))
@@ -307,7 +305,8 @@ can be matched.  WITH-PROFILE puts the environment in front."
                          files))
          (width (apply #'max (mapcar #'length labels))))
     (cl-mapcar (lambda (label file)
-                 (let ((description (or (devtools-sql--file-description (car file))
+                 (let ((description (or (and (file-exists-p (car file))
+                                             (devtools-sql--file-description (car file)))
                                         (and (null (nth 3 file)) "(default file)"))))
                    (cons (if description
                              (concat label (make-string (- width (length label)) ?\s) "  "
@@ -324,13 +323,14 @@ prefix argument ALL, look in every environment."
   (interactive "P")
   (let* ((profiles (if all (mapcar #'car devtools-profiles) (list (devtools-current-profile))))
          (files (or (devtools-sql--query-files profiles)
-                    (user-error "No query files yet; %s creates one"
-                                (substitute-command-keys "\\[devtools-sql-query]"))))
+                    (user-error "No datasources in %s"
+                                (if all "the profiles" (car profiles)))))
          (candidates (devtools-sql--find-file-candidates files all))
          (choice (completing-read (if all "Query file: "
                                     (format "Query file [%s]: " (car profiles)))
                                   candidates nil t)))
     (pcase-let ((`(,file ,profile ,conn ,name) (cdr (assoc choice candidates))))
+      (make-directory (file-name-directory file) t)
       (prog1 (find-file file)
         (devtools-sql--link-query-buffer conn profile name)))))
 

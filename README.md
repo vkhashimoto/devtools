@@ -70,7 +70,8 @@ result buffer (`*SQL Result: prod/app*`, `*SQL Result: prod/app/cleanup*`).
 A file's **description** is its first line when that is a comment.  A new named
 file asks for one and writes it there (`-- Monthly revenue by customer`); edit
 that line to change it.  `C-c d f` lists the files with their descriptions,
-so any word of either finds a file:
+so any word of either finds a file.  Every datasource's default file is
+listed, even before it exists:
 
 ```
 Query file [prod]:

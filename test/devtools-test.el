@@ -887,11 +887,31 @@
               (should (member "local/app/report" collection))))
         (delete-directory devtools-sql-query-directory t)))))
 
-(ert-deftest devtools-test-find-query-file-without-files ()
+(ert-deftest devtools-test-find-query-file-without-datasources ()
   (devtools-test--with-profiles
-    (let ((devtools-sql-query-directory (make-temp-file "devtools-sql" t)))
+    (let ((devtools--current-profile 'empty))
+      (should-error (devtools-sql-find-file) :type 'user-error))))
+
+(ert-deftest devtools-test-find-lists-default-files-not-created-yet ()
+  (devtools-test--with-profiles
+    (let ((devtools-sql-query-directory (make-temp-file "devtools-sql" t))
+          collection)
       (unwind-protect
-          (should-error (devtools-sql-find-file) :type 'user-error)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt candidates &rest _)
+                       (setq collection (mapcar (lambda (c) (substring-no-properties (car c)))
+                                                candidates))
+                       (seq-find (lambda (c) (string-prefix-p "prod/writer " c)) collection))))
+            (let ((buffer (save-window-excursion (devtools-sql-find-file t))))
+              (should (equal collection
+                             '("local/app    (default file)"
+                               "prod/app     (default file)"
+                               "prod/writer  (default file)")))
+              (with-current-buffer buffer
+                (should (string-suffix-p "/prod/writer.sql" buffer-file-name))
+                (should (equal (plist-get devtools-sql-connection :name) "writer"))
+                (should (eq devtools-sql-profile 'prod))
+                (kill-buffer))))
         (delete-directory devtools-sql-query-directory t)))))
 
 ;;; devtools-test.el ends here

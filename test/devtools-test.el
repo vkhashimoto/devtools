@@ -107,6 +107,16 @@
 
 ;;; Result buffer
 
+(defun devtools-test--body ()
+  "The current result buffer's text below its query."
+  (buffer-substring-no-properties
+   (if (get-text-property (point-min) 'devtools-sql-result-query)
+       (min (point-max)
+            (1+ (next-single-property-change (point-min) 'devtools-sql-result-query
+                                             nil (point-max))))
+     (point-min))
+   (point-max)))
+
 (defun devtools-test--response (&rest sets)
   "A query/execute reply holding SETS, as the server sends it."
   (list :elapsedMs 1 :results (vconcat sets)))
@@ -134,7 +144,7 @@
       (devtools-test--response
        (devtools-test--table '("id" "customer" "note")
                              '(("1" "acme" nil) ("22" "globex" "a|b") ("3" "initech" ""))))
-    (should (equal (buffer-string)
+    (should (equal (devtools-test--body)
                    (concat "| id | customer | note   |\n"
                            "|----+----------+--------|\n"
                            "|  1 | acme     | [NULL] |\n"
@@ -153,10 +163,10 @@
   (devtools-test--with-result
       (devtools-test--response (devtools-test--table '("n") '(("1")))
                                (list :totalRows 0 :command "UPDATE 3"))
-    (should (equal (buffer-string) "UPDATE 3"))
+    (should (equal (devtools-test--body) "UPDATE 3"))
     (should (string-match-p "(last of 2 results)" (devtools-sql-result--header-line))))
   (devtools-test--with-result (devtools-test--response)
-    (should (equal (buffer-string) "No statements"))))
+    (should (equal (devtools-test--body) "No statements"))))
 
 (ert-deftest devtools-test-result-error ()
   (let ((buffer (save-window-excursion
@@ -168,7 +178,7 @@
            buffer '(:code -32001 :message "column \"nope\" does not exist"
                     :data (:sqlstate "42703" :position 18 :hint "Check the name."))
            0.1)
-          (should (equal (buffer-string)
+          (should (equal (devtools-test--body)
                          (concat "ERROR:  column \"nope\" does not exist\n"
                                  "LINE 2: select nope from orders\n"
                                  "               ^\n"
@@ -194,8 +204,7 @@
           (devtools-sql-result-copy-null-as "")
           (devtools-sql-result-copy-header nil)
           (devtools-sql-result-copy-delimiter "\t"))
-      (goto-char (point-min))
-      (forward-line 2)
+      (devtools-sql-result--goto-first-row)
       (org-table-goto-column 2)
       (devtools-sql-result-copy)
       (should (equal (car kill-ring) "acme"))
@@ -268,7 +277,7 @@
     (let ((result (get-buffer "*SQL Result: local/app*")))
       (should (eq (devtools-test--wait-for-result result) 'done))
       (with-current-buffer result
-        (should (equal (buffer-string)
+        (should (equal (devtools-test--body)
                        (concat "| id | customer |  total |\n"
                                "|----+----------+--------|\n"
                                "|  1 | acme     | 120.50 |\n"
@@ -278,7 +287,7 @@
         ;; `g' runs the same query again.
         (save-window-excursion (devtools-sql-result-rerun))
         (should (eq (devtools-test--wait-for-result result) 'done))
-        (should (string-match-p "initech" (buffer-string)))))))
+        (should (string-match-p "initech" (devtools-test--body)))))))
 
 (defun devtools-test--server-call (method params)
   "Send METHOD with PARAMS to the server and wait; return (RESULT . ERROR)."
@@ -297,7 +306,7 @@
     result))
 
 (defun devtools-test--result-text (buffer)
-  (with-current-buffer buffer (buffer-string)))
+  (with-current-buffer buffer (devtools-test--body)))
 
 (defun devtools-test--result-header (buffer)
   (with-current-buffer buffer (devtools-sql-result--header-line)))
@@ -334,8 +343,8 @@
     (let ((result (get-buffer "*SQL Result: local/app*")))
       (should (eq (devtools-test--wait-for-result result) 'done))
       (accept-process-output nil 0.3)
-      (should (string-match-p "fast" (with-current-buffer result (buffer-string))))
-      (should-not (string-match-p "slow" (with-current-buffer result (buffer-string)))))))
+      (should (string-match-p "fast" (with-current-buffer result (devtools-test--body))))
+      (should-not (string-match-p "slow" (with-current-buffer result (devtools-test--body)))))))
 
 (ert-deftest devtools-test-postgres-server-features ()
   (skip-unless (devtools-test--server-p))
@@ -344,19 +353,19 @@
       ;; NULL and the empty string differ.
       (save-window-excursion (devtools-sql-run-string "select null::text as a, '' as b"))
       (should (eq (devtools-test--wait-for-result (funcall result)) 'done))
-      (should (equal (with-current-buffer (funcall result) (buffer-string))
+      (should (equal (with-current-buffer (funcall result) (devtools-test--body))
                      "| a      | b |\n|--------+---|\n| [NULL] |   |\n"))
       ;; Errors point at the failing spot.
       (save-window-excursion (devtools-sql-run-string "select 1;\nselect nope from orders"))
       (should (eq (devtools-test--wait-for-result (funcall result)) 'failed))
       (should (string-match-p "^LINE 2: select nope from orders\n +\\^$"
-                              (with-current-buffer (funcall result) (buffer-string))))
+                              (with-current-buffer (funcall result) (devtools-test--body))))
       ;; After the server is stopped, the next query starts it and reopens
       ;; the connection.
       (devtools-server-stop)
       (save-window-excursion (devtools-sql-run-string "select 'back' as state"))
       (should (eq (devtools-test--wait-for-result (funcall result)) 'done))
-      (should (string-match-p "back" (with-current-buffer (funcall result) (buffer-string)))))))
+      (should (string-match-p "back" (with-current-buffer (funcall result) (devtools-test--body)))))))
 
 (ert-deftest devtools-test-postgres-repl ()
   (skip-unless (getenv "DEVTOOLS_PG_PORT"))
@@ -576,7 +585,7 @@
   (devtools-test--with-query-file
     (let* ((result (devtools-test--run "select pg_backend_pid()"))
            (pid (with-current-buffer result
-                  (goto-char (point-min)) (forward-line 2)
+                  (devtools-sql-result--goto-first-row)
                   (string-trim (cadr (split-string (thing-at-point 'line t) "|"))))))
       (devtools-test--run (format "select pg_terminate_backend(%s)" pid) t)
       (setq result (devtools-test--run "select 1"))
@@ -1149,5 +1158,113 @@
       (devtools-sql-result-mark-whole-column)
       (devtools-sql-result-copy)
       (should (equal (car kill-ring) "customer\nacme\nglobex")))))
+
+;;; The query in the result buffer
+
+(defmacro devtools-test--with-query-result (sql location &rest body)
+  "Show a two-row result of SQL, run from LOCATION, and run BODY there."
+  (declare (indent 2))
+  `(let ((devtools-profiles '((local)))
+         (devtools-sql-result-query-expanded nil)
+         (buffer (save-window-excursion
+                   (devtools-sql-result-start '(:name "app") 'local #'ignore ,sql nil ,location))))
+     (unwind-protect
+         (progn
+           (devtools-sql-result-show
+            buffer (devtools-test--response
+                    (devtools-test--table '("id" "customer") '(("1" "acme") ("2" "globex"))))
+            0.1)
+           (with-current-buffer buffer ,@body))
+       (kill-buffer buffer))))
+
+(defun devtools-test--query-text ()
+  "The text of the query line(s) at the top of the result buffer."
+  (buffer-substring-no-properties
+   (point-min) (next-single-property-change (point-min) 'devtools-sql-result-query nil (point-max))))
+
+(ert-deftest devtools-test-result-query-collapsed-and-expanded ()
+  (devtools-test--with-query-result
+      "select id, customer\nfrom orders\norder by id" '(:file "/q/local/app/report.sql" :line 12)
+    (should (equal (devtools-test--query-text)
+                   "▸ select id, customer…   report.sql:12\n"))
+    ;; Point starts on the first row, so the table keys work at once.
+    (should (equal (devtools-sql-result--cell) '(2 . 1)))
+    (devtools-sql-result-mark-whole-column)
+    (devtools-sql-result-toggle-query)
+    (should (equal (devtools-test--query-text)
+                   "▾ report.sql:12\n  select id, customer\n  from orders\n  order by id\n"))
+    ;; The table and its marks are untouched.
+    (should (equal (devtools-test--body) "| id | customer |\n|----+----------|\n|  1 | acme     |\n|  2 | globex   |\n"))
+    (should (equal devtools-sql-result--table-size '(2 . 2)))
+    (let ((kill-ring nil) (devtools-sql-result-copy-header nil))
+      (devtools-sql-result-copy)
+      (should (equal (car kill-ring) "1\n2")))
+    (devtools-sql-result-toggle-query)
+    (should (string-prefix-p "▸ select id, customer…" (devtools-test--query-text)))))
+
+(ert-deftest devtools-test-result-query-long-line-and-no-location ()
+  (devtools-test--with-query-result (concat "select " (make-string 100 ?x)) nil
+    (should (equal (devtools-test--query-text)
+                   (concat "▸ select " (make-string 65 ?x) "…\n")))
+    (should-error (devtools-sql-result-visit-query) :type 'user-error)))
+
+(ert-deftest devtools-test-result-query-keys ()
+  (devtools-test--with-query-result "select 1" nil
+    (goto-char (point-min))
+    (should (eq (key-binding (kbd "RET")) #'devtools-sql-result-visit-query))
+    (devtools-sql-result--goto-first-row)
+    (should-not (eq (key-binding (kbd "RET")) #'devtools-sql-result-visit-query))
+    (should (eq (key-binding (kbd "TAB")) #'devtools-sql-result-toggle-query))
+    (should (eq (key-binding [tab]) #'devtools-sql-result-toggle-query))))
+
+(ert-deftest devtools-test-result-query-stays-expanded ()
+  (devtools-test--with-query-result "select 1" nil
+    (devtools-sql-result-toggle-query)
+    ;; The next run in the same buffer keeps it expanded.
+    (devtools-sql-result-start '(:name "app") 'local #'ignore "select 2")
+    (should (string-prefix-p "▾ query\n  select 2" (devtools-test--query-text)))))
+
+(ert-deftest devtools-test-result-visit-query ()
+  (let ((file (make-temp-file "devtools-query" nil ".sql" "-- report\n\nselect 1;\n\nselect id\nfrom orders;\n")))
+    (unwind-protect
+        (let* ((source (find-file-noselect file))
+               (marker (with-current-buffer source
+                         (goto-char (point-min)) (search-forward "select id")
+                         (copy-marker (match-beginning 0)))))
+          (devtools-test--with-query-result "select id\nfrom orders" (list :file file :line 5 :marker marker)
+            ;; Lines added above the query since: the marker follows.
+            (with-current-buffer source
+              (goto-char (point-min)) (insert "-- new line\n"))
+            (save-window-excursion
+              (devtools-sql-result-visit-query)
+              (should (eq (current-buffer) source))
+              (should (looking-at "select id"))
+              (should (= (line-number-at-pos) 6)))
+            ;; The file closed: its recorded line.
+            (with-current-buffer source (set-buffer-modified-p nil))
+            (kill-buffer source)
+            (save-window-excursion
+              (devtools-sql-result-visit-query)
+              (should (equal buffer-file-name file))
+              (should (= (line-number-at-pos) 5))
+              (kill-buffer))))
+      (delete-file file))))
+
+(ert-deftest devtools-test-postgres-result-records-location ()
+  (skip-unless (devtools-test--server-p))
+  (devtools-test--with-query-file
+    (insert "-- first\n\nselect 1;\n\nselect id,\n       customer\nfrom orders;\n")
+    (goto-char (point-min))
+    (search-forward "customer")
+    (save-window-excursion (call-interactively #'devtools-sql-run))
+    (let ((result (get-buffer "*SQL Result: local/app*")))
+      (should (eq (devtools-test--wait-for-result result) 'done))
+      (with-current-buffer result
+        (should (string-match-p "\\`▸ select id,…   app.sql:5\n" (devtools-test--query-text)))
+        (save-window-excursion
+          (goto-char (point-min))
+          (call-interactively (key-binding (kbd "RET")))
+          (should (equal (buffer-name) "app.sql"))
+          (should (looking-at "select id,")))))))
 
 ;;; devtools-test.el ends here

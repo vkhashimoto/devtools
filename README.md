@@ -181,6 +181,18 @@ Tables outside `public` are offered qualified (`sales.leads`).  Annotations show
 the column type, or whether a name is a table or a view.  Only tables your user
 can see in `information_schema` are listed.
 
+The result buffer starts with the query that ran, collapsed to its first line
+and followed by where it is in its file; `TAB` shows the whole query (with SQL
+highlighting) or hides it again, and `RET` on it goes to the query in its file:
+
+```
+▸ select id, customer, total…   report.sql:12
+
+| id | customer |  total |
+|----+----------+--------|
+|  1 | acme     | 120.50 |
+```
+
 In a result buffer (`devtools-sql-result-mode`):
 
 | Key       | Action                                                        |
@@ -196,6 +208,8 @@ In a result buffer (`devtools-sql-result-mode`):
 | `H`       | Copy column names too                                         |
 | `D`       | Choose the delimiter between copied cells                     |
 | `g`       | Run the query again; by default only queries that read (`devtools-sql-result-allow-rerun`) |
+| `TAB`     | Show or hide the whole query                                  |
+| `RET`     | On the query: go to it in its file                            |
 | `q`       | Close the window                                              |
 | `?`       | Menu with all of the above (like magit's `?`)               |
 
@@ -240,6 +254,7 @@ The server's own log is in `*devtools-server stderr*`.
 - `devtools-sql-query-files-use-session`: query files run on a session (default) or the pool.
 - `devtools-sql-query-directory`: where query files are saved.
 - `devtools-sql-result-max-rows`: rows shown in a result buffer (default 1000).
+- `devtools-sql-result-query-expanded`: show the whole query at first (default: its first line).
 - `devtools-sql-result-allow-rerun`: which queries `g` runs again: `reads` (default:
   SELECT, WITH, SHOW, EXPLAIN, VALUES, TABLE without a write inside), `all`, or nil
   (off).  A function called from a SELECT can still have side effects (`nextval`).

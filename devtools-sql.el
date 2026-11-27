@@ -669,11 +669,13 @@ and the error plist."
           conn profile "query/execute"
           (list :sql sql :maxRows devtools-sql-result-max-rows) callback)))))))
 
-(defun devtools-sql-execute (conn profile query &optional source use-session)
+(defun devtools-sql-execute (conn profile query &optional source use-session location)
   "Run QUERY on CONN in PROFILE and show the result in a result buffer.
 SOURCE is the query buffer it comes from, if any: its result buffer
 shows the result.  With USE-SESSION, run on SOURCE's session; else on
-the pool.  Only the result of the last statement is shown."
+the pool.  LOCATION, a plist (:file :line :marker), is where QUERY is
+in its file, if it came from one.  Only the result of the last
+statement is shown."
   (let* ((source (and (buffer-live-p source) source))
          (session-buffer (and use-session source))
          (name (and source (buffer-local-value 'devtools-sql-query-name source))))
@@ -690,8 +692,8 @@ the pool.  Only the result of the last statement is shown."
     (devtools-sql--refresh-connection conn profile)
     (let ((result (devtools-sql-result-start
                    conn profile
-                   (lambda () (devtools-sql-execute conn profile query source use-session))
-                   query name))
+                   (lambda () (devtools-sql-execute conn profile query source use-session location))
+                   query name location))
           (target (if session-buffer 'session 'pool))
           (started (float-time))
           (run (list 'run)))
@@ -751,12 +753,19 @@ OTHER; `devtools-sql-query-files-use-session' swaps the two."
            (list current-prefix-arg)))
   (unless devtools-sql-connection
     (user-error "Buffer is not linked to a connection; open it with `devtools-sql-query'"))
-  (let ((query (string-trim (buffer-substring-no-properties start end))))
+  (let ((query (string-trim (buffer-substring-no-properties start end)))
+        (query-start (save-excursion (goto-char start)
+                                     (skip-chars-forward " \t\n")
+                                     (point))))
     (when (string-empty-p query)
       (user-error "No query at point"))
     (pulse-momentary-highlight-region start end)
     (devtools-sql-execute devtools-sql-connection devtools-sql-profile query
-                          (current-buffer) (devtools-sql--use-session-p other))))
+                          (current-buffer) (devtools-sql--use-session-p other)
+                          (and buffer-file-name
+                               (list :file buffer-file-name
+                                     :line (line-number-at-pos query-start)
+                                     :marker (copy-marker query-start))))))
 
 (defun devtools-sql-run-string (query &optional other)
   "Run QUERY and show its rows.

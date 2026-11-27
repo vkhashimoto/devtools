@@ -12,6 +12,7 @@
 ;;   w    copy marked cells (or the cell at point)
 ;;   W    copy the row           N    copy NULL as nothing / NULL
 ;;   H    copy column names too  D    choose the delimiter
+;;   TAB  show or hide the whole query  RET  on the query: go to its file
 ;;   g    run the query again (see `devtools-sql-result-allow-rerun')
 ;;   ?    menu with all of the above
 ;;
@@ -23,6 +24,8 @@
 
 (require 'org)
 (require 'org-table)
+(require 'pulse)
+(require 'sql)
 (require 'seq)
 (require 'transient)
 (require 'devtools-profiles)
@@ -30,6 +33,12 @@
 (defcustom devtools-sql-result-max-rows 1000
   "Maximum number of rows shown in a result buffer."
   :type 'natnum
+  :group 'devtools)
+
+(defcustom devtools-sql-result-query-expanded nil
+  "Non-nil means result buffers show their whole query at first.
+Otherwise they show its first line; \\<devtools-sql-result-mode-map>\\[devtools-sql-result-toggle-query] shows or hides the rest."
+  :type 'boolean
   :group 'devtools)
 
 (defcustom devtools-sql-result-allow-rerun 'reads
@@ -93,10 +102,15 @@ for instance); those are not detected."
 (put 'devtools-sql-result--rerun-function 'permanent-local t)
 
 (defvar-local devtools-sql-result--info nil
-  "Plist describing the result: :connection :profile :name :sql :state :run
+  "Plist describing the result: :connection :profile :name :sql :location
+:state :run
 :target (`session' or `pool') :tx :elapsed :statements :shown-rows
 :total-rows.")
 (put 'devtools-sql-result--info 'permanent-local t)
+
+(defvar-local devtools-sql-result--query-expanded nil
+  "Non-nil when this result buffer shows its whole query.")
+(put 'devtools-sql-result--query-expanded 'permanent-local t)
 
 (defvar-local devtools-sql-result--marks nil
   "Marked cells of the result table, as (ROW . COLUMN) pairs.
@@ -113,22 +127,28 @@ NAME is the query file's name, nil for the default file."
   (format "*SQL Result: %s/%s%s*" profile (plist-get connection :name)
           (if name (concat "/" name) "")))
 
-(defun devtools-sql-result-start (connection profile rerun &optional sql name)
+(defun devtools-sql-result-start (connection profile rerun &optional sql name location)
   "Prepare and show the result buffer for a query on CONNECTION in PROFILE.
-RERUN is a function that runs the query again; SQL is the query, used
-to point at errors; NAME is the query file's name, nil for the default
-file.  Return the buffer."
+RERUN is a function that runs the query again; SQL is the query, shown
+above the result and used to point at errors; NAME is the query file's
+name, nil for the default file; LOCATION, a plist (:file :line
+:marker), is where the query is in its file, if it came from one.
+Return the buffer."
   (with-current-buffer (get-buffer-create (devtools-sql-result-buffer-name connection profile name))
+    (unless (local-variable-p 'devtools-sql-result--query-expanded)
+      (setq-local devtools-sql-result--query-expanded devtools-sql-result-query-expanded))
+    (setq devtools-sql-result--rerun-function rerun
+          devtools-sql-result--info (list :connection connection :profile profile
+                                          :name name :sql sql :location location
+                                          :state 'running))
     (let ((inhibit-read-only t))
       (devtools-sql-result-mode -1)
       (devtools-sql-result--clear-overlays)
       (erase-buffer)
       (org-mode)
+      (devtools-sql-result--insert-query)
       (insert (propertize "Running..." 'face 'shadow)))
-    (setq devtools-sql-result--rerun-function rerun
-          devtools-sql-result--info (list :connection connection :profile profile
-                                          :name name :sql sql :state 'running)
-          header-line-format '(:eval (devtools-sql-result--header-line))
+    (setq header-line-format '(:eval (devtools-sql-result--header-line))
           truncate-lines t)
     (set-buffer-modified-p nil)
     (read-only-mode 1)
@@ -150,8 +170,11 @@ the result's (SHOWN-ROWS . TOTAL-ROWS), or nil when it is no table."
       (let ((inhibit-read-only t)
             rows)
         (erase-buffer)
+        (devtools-sql-result--insert-query)
         (setq rows (funcall insert))
-        (goto-char (point-min))
+        (devtools-sql-result--goto-first-row)
+        (dolist (window (get-buffer-window-list nil nil t))
+          (set-window-point window (point)))
         (setq devtools-sql-result--info
               (thread-first devtools-sql-result--info
                             (plist-put :state state)
@@ -276,6 +299,111 @@ ELAPSED is in seconds."
                    (funcall on "NULL"))
                  (if devtools-sql-result-copy-header (funcall on "yes") (funcall off "no"))
                  (funcall on (devtools-sql-result--delimiter-name))))))))
+
+;;; The query
+
+(defvar-keymap devtools-sql-result-query-map
+  :doc "Keys on the query at the top of a result buffer."
+  "RET" #'devtools-sql-result-visit-query)
+
+(defconst devtools-sql-result--query-width 72
+  "Characters of a collapsed query's first line shown.")
+
+(defun devtools-sql-result--fontify-sql (sql)
+  "Return SQL highlighted as in `sql-mode'.
+The faces are `font-lock-face' properties, which Org's font-lock in
+the result buffer leaves alone."
+  (with-temp-buffer
+    (insert sql)
+    (delay-mode-hooks (sql-mode))
+    (sql-set-product 'postgres)
+    (font-lock-ensure)
+    (let ((position (point-min)))
+      (while (< position (point-max))
+        (let ((next (next-single-property-change position 'face nil (point-max))))
+          (when-let* ((face (get-text-property position 'face)))
+            (put-text-property position next 'font-lock-face face))
+          (setq position next))))
+    (remove-list-of-text-properties (point-min) (point-max) '(face))
+    (buffer-string)))
+
+(defun devtools-sql-result--location-label (location)
+  "Return \"FILE:LINE\" for LOCATION, or nil."
+  (when location
+    (format "%s:%d" (file-name-nondirectory (plist-get location :file))
+            (plist-get location :line))))
+
+(defun devtools-sql-result--insert-query ()
+  "Insert the query of this result at point, whole or as its first line.
+RET on it goes to the query in its file."
+  (when-let* ((sql (plist-get devtools-sql-result--info :sql)))
+    (let ((sql (string-trim sql))
+          (label (devtools-sql-result--location-label
+                  (plist-get devtools-sql-result--info :location)))
+          (start (point)))
+      (if devtools-sql-result--query-expanded
+          ;; Indented, so Org does not read its lines as headings or tables.
+          (insert (propertize (concat "▾ " (or label "query")) 'font-lock-face 'shadow) "\n"
+                  (replace-regexp-in-string "^" "  " (devtools-sql-result--fontify-sql sql))
+                  "\n")
+        (let* ((lines (split-string sql "\n"))
+               (first (string-trim (car lines)))
+               (long (> (length first) devtools-sql-result--query-width)))
+          (insert (propertize "▸ " 'font-lock-face 'shadow)
+                  (devtools-sql-result--fontify-sql
+                   (if long (substring first 0 devtools-sql-result--query-width) first))
+                  (if (or long (cdr lines)) (propertize "…" 'font-lock-face 'shadow) "")
+                  (if label (concat "   " (propertize label 'font-lock-face 'shadow)) "")
+                  "\n")))
+      (add-text-properties start (point)
+                           (list 'devtools-sql-result-query t
+                                 'keymap devtools-sql-result-query-map
+                                 'help-echo "RET: go to the query in its file"))
+      (insert "\n"))))
+
+(defun devtools-sql-result--goto-first-row ()
+  "Move to the table's first row, or to the top if there is no table."
+  (if (not (devtools-sql-result--goto-table))
+      (goto-char (point-min))
+    (forward-line 2)
+    (if (and (org-at-table-p) (not (org-at-table-hline-p)))
+        (org-table-goto-column 1)
+      (devtools-sql-result--goto-table))))
+
+(defun devtools-sql-result-toggle-query ()
+  "Show the whole query of this result, or only its first line."
+  (interactive)
+  (unless (plist-get devtools-sql-result--info :sql)
+    (user-error "No query to show"))
+  (setq devtools-sql-result--query-expanded (not devtools-sql-result--query-expanded))
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (when (get-text-property (point-min) 'devtools-sql-result-query)
+        ;; The query, then the blank line after it.
+        (delete-region (point-min)
+                       (min (point-max)
+                            (1+ (next-single-property-change
+                                 (point-min) 'devtools-sql-result-query nil (point-max))))))
+      (goto-char (point-min))
+      (devtools-sql-result--insert-query)))
+  (set-buffer-modified-p nil))
+
+(defun devtools-sql-result-visit-query ()
+  "Go to the query of this result in its file."
+  (interactive)
+  (let* ((location (plist-get devtools-sql-result--info :location))
+         (marker (plist-get location :marker)))
+    (cond
+     ;; The file is open: the marker follows the edits made since.
+     ((and (markerp marker) (marker-buffer marker))
+      (pop-to-buffer (marker-buffer marker))
+      (goto-char marker))
+     (location
+      (pop-to-buffer (find-file-noselect (plist-get location :file)))
+      (goto-char (point-min))
+      (forward-line (1- (plist-get location :line))))
+     (t (user-error "This query was not run from a file")))
+    (pulse-momentary-highlight-one-line (point))))
 
 ;;; Cells
 
@@ -652,6 +780,8 @@ SELECT FOR UPDATE make it a write.  When unsure, it is not a read."
     ("D" devtools-sql-result-set-copy-delimiter
      :description devtools-sql-result--delimiter-description)]
    ["Query"
+    ("TAB" "Show or hide the query" devtools-sql-result-toggle-query)
+    ("RET" "Go to the query in its file" devtools-sql-result-visit-query)
     ("g" "Run again" devtools-sql-result-rerun
      :if (lambda () devtools-sql-result-allow-rerun))
     ("q" "Close window" quit-window)]])
@@ -660,6 +790,9 @@ SELECT FOR UPDATE make it a write.  When unsure, it is not a read."
 
 (defvar-keymap devtools-sql-result-mode-map
   "?" #'devtools-sql-result-dispatch
+  "TAB" #'devtools-sql-result-toggle-query
+  ;; Org binds <tab> too, which would win over TAB.
+  "<tab>" #'devtools-sql-result-toggle-query
   "n" #'devtools-sql-result-next-row
   "p" #'devtools-sql-result-previous-row
   "f" #'devtools-sql-result-next-column

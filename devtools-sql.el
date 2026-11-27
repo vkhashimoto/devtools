@@ -212,50 +212,66 @@ Files are named PROFILE/CONNECTION.sql; for `find-file-hook'."
     (while (accept-process-output process 0.05)))
   (with-current-buffer buffer (buffer-string)))
 
-(defun devtools-sql-execute (conn profile query)
-  "Run QUERY on CONN in PROFILE and show the result in a result buffer.
-Only the result of the last statement is shown.  Return the process."
+(defvar devtools-sql-after-execute-functions nil
+  "Functions called after a query run with `devtools-sql-execute' ends.
+Each is called with the connection, the profile, psql's exit code and
+its output.")
+
+(defun devtools-sql-psql-async (conn profile query callback)
+  "Run QUERY on CONN in PROFILE with psql in the background.
+Output is CSV.  When psql exits, call CALLBACK with its exit code, its
+output and its error output.  Return the process."
   (let* ((program (or (executable-find devtools-sql-psql-program)
                       (user-error "Cannot find `%s'; install the PostgreSQL client or set `devtools-sql-psql-program'"
                                   devtools-sql-psql-program)))
-         (previous (devtools-sql--result-process conn profile))
-         (result (devtools-sql-result-start
-                  conn profile (lambda () (devtools-sql-execute conn profile query))))
          (stdout (generate-new-buffer " *devtools-sql-output*"))
          (stderr (generate-new-buffer " *devtools-sql-errors*"))
-         (started (float-time))
          (default-directory (expand-file-name "~/"))
          (process-environment (append (devtools-sql--environment conn profile)
-                                      process-environment))
+                                      process-environment)))
+    (make-process
+     :name "devtools-sql"
+     :buffer stdout
+     :stderr stderr
+     :connection-type 'pipe
+     :command `(,program ,@(devtools-sql--psql-args conn)
+                         ;; No psqlrc, never prompt for a password, CSV
+                         ;; output, and stop at the first error.
+                         "-X" "-w" "--csv" "--pset=null=[NULL]"
+                         "-v" "ON_ERROR_STOP=1" "-v" "SHOW_ALL_RESULTS=off"
+                         "-c" ,query)
+     :sentinel
+     (lambda (process _event)
+       (unless (process-live-p process)
+         (unwind-protect
+             (funcall callback (process-exit-status process)
+                      (devtools-sql--drain stdout)
+                      (devtools-sql--drain stderr))
+           (dolist (buffer (list stdout stderr))
+             (when-let* ((reader (get-buffer-process buffer)))
+               (delete-process reader))
+             (kill-buffer buffer))))))))
+
+(defun devtools-sql-execute (conn profile query)
+  "Run QUERY on CONN in PROFILE and show the result in a result buffer.
+Only the result of the last statement is shown.  Return the process."
+  (let* ((previous (devtools-sql--result-process conn profile))
+         (result (devtools-sql-result-start
+                  conn profile (lambda () (devtools-sql-execute conn profile query))))
+         (started (float-time))
          process)
     (when (process-live-p previous)
       (delete-process previous))
     (setq process
-          (make-process
-           :name "devtools-sql"
-           :buffer stdout
-           :stderr stderr
-           :connection-type 'pipe
-           :command `(,program ,@(devtools-sql--psql-args conn)
-                               ;; No psqlrc, never prompt for a password, CSV
-                               ;; output, and stop at the first error.
-                               "-X" "-w" "--csv" "--pset=null=[NULL]"
-                               "-v" "ON_ERROR_STOP=1" "-v" "SHOW_ALL_RESULTS=off"
-                               "-c" ,query)
-           :sentinel
-           (lambda (process _event)
-             (unless (process-live-p process)
-               (unwind-protect
-                   ;; A query that was run again in the meantime is stale.
-                   (when (eq process (devtools-sql--result-process conn profile))
-                     (devtools-sql-result-finish result (process-exit-status process)
-                                                 (devtools-sql--drain stdout)
-                                                 (devtools-sql--drain stderr)
-                                                 (- (float-time) started)))
-                 (dolist (buffer (list stdout stderr))
-                   (when-let* ((reader (get-buffer-process buffer)))
-                     (delete-process reader))
-                   (kill-buffer buffer)))))))
+          (devtools-sql-psql-async
+           conn profile query
+           (lambda (exit-code output errors)
+             ;; A query that was run again in the meantime is stale.
+             (when (eq process (devtools-sql--result-process conn profile))
+               (devtools-sql-result-finish result exit-code output errors
+                                           (- (float-time) started)))
+             (run-hook-with-args 'devtools-sql-after-execute-functions
+                                 conn profile exit-code output))))
     (with-current-buffer result
       (setq devtools-sql-result--info
             (plist-put devtools-sql-result--info :process process)))

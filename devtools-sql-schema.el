@@ -2,9 +2,10 @@
 
 ;;; Commentary:
 
-;; Loads the tables and columns of a connection from information_schema,
-;; caches them per environment/connection, and offers them through
-;; `completion-at-point' in query files (corfu, company, C-M-i...):
+;; Loads the tables and columns of a connection from devtools-server
+;; (schema/describe), caches them per environment/connection, and offers
+;; them through `completion-at-point' in query files (corfu, company,
+;; C-M-i...):
 ;;
 ;;   orders.|      columns of orders
 ;;   o.|           columns of the table aliased o in the statement
@@ -24,67 +25,53 @@
   :type 'number
   :group 'devtools)
 
-(defconst devtools-sql-schema--query
-  "select c.table_schema, c.table_name, t.table_type, c.column_name, c.data_type
-from information_schema.columns c
-join information_schema.tables t using (table_schema, table_name)
-where c.table_schema not in ('pg_catalog', 'information_schema')
-order by c.table_schema, c.table_name, c.ordinal_position"
-  "Query listing every visible column with its table.")
-
 (defvar devtools-sql-schema--cache (make-hash-table :test #'equal)
   "Tables per (PROFILE . CONNECTION-NAME).
 Each table is a plist (:schema :name :type :columns), :columns being a
 list of (NAME . TYPE).")
 
 (defvar devtools-sql-schema--loading (make-hash-table :test #'equal)
-  "Process loading the schema, per (PROFILE . CONNECTION-NAME).")
+  "Token of the load in progress, per (PROFILE . CONNECTION-NAME).")
 
 (defun devtools-sql-schema--key (conn profile)
   "Return the cache key of CONN in PROFILE."
   (cons profile (plist-get conn :name)))
 
-(defun devtools-sql-schema--parse (output)
-  "Turn the CSV OUTPUT of `devtools-sql-schema--query' into tables."
-  (let (tables)
-    (dolist (row (cdr (devtools-sql-result-parse-csv output)))
-      (pcase-let ((`(,schema ,name ,type ,column ,data-type) row))
-        (unless (and tables
-                     (equal (plist-get (car tables) :schema) schema)
-                     (equal (plist-get (car tables) :name) name))
-          (push (list :schema schema :name name :type type :columns nil) tables))
-        (plist-put (car tables) :columns
-                   (cons (cons column data-type) (plist-get (car tables) :columns)))))
-    (dolist (table tables)
-      (plist-put table :columns (nreverse (plist-get table :columns))))
-    (nreverse tables)))
+(defun devtools-sql-schema--tables (result)
+  "Turn RESULT, the server's reply to schema/describe, into tables."
+  (mapcar (lambda (table)
+            (list :schema (plist-get table :schema)
+                  :name (plist-get table :name)
+                  :type (plist-get table :type)
+                  :columns (mapcar (lambda (column)
+                                     (cons (plist-get column :name) (plist-get column :type)))
+                                   (plist-get table :columns))))
+          (plist-get result :tables)))
 
 (defun devtools-sql-schema-load (conn profile &optional force callback)
   "Load the tables and columns of CONN in PROFILE in the background.
-Does nothing if a load is already running, unless FORCE restarts it.
-Call CALLBACK with no arguments once the schema is stored."
-  (let* ((key (devtools-sql-schema--key conn profile))
-         (running (gethash key devtools-sql-schema--loading))
-         process)
-    (when (and force (process-live-p running))
-      (remhash key devtools-sql-schema--loading)
-      (delete-process running))
-    (unless (and (not force) (process-live-p running))
-      (setq process
-            (devtools-sql-psql-async
-             conn profile devtools-sql-schema--query
-             (lambda (exit-code output errors)
-               ;; A load replaced by a forced one is stale.
-               (when (eq process (gethash key devtools-sql-schema--loading))
-                 (remhash key devtools-sql-schema--loading)
-                 (if (not (zerop exit-code))
-                     (message "devtools: could not load the schema of %s/%s: %s"
-                              profile (plist-get conn :name)
-                              (car (split-string (string-trim errors) "\n")))
-                   (puthash key (devtools-sql-schema--parse output)
-                            devtools-sql-schema--cache)
-                   (when callback (funcall callback)))))))
-      (puthash key process devtools-sql-schema--loading))))
+Does nothing if a load is already running, unless FORCE starts another
+one (the running one's result is then ignored).  Call CALLBACK with no
+arguments once the schema is stored."
+  (let ((key (devtools-sql-schema--key conn profile))
+        (token (list 'load)))
+    (when (or force (not (gethash key devtools-sql-schema--loading)))
+      (puthash key token devtools-sql-schema--loading)
+      (condition-case err
+          (devtools-sql-server-request
+           conn profile "schema/describe" nil
+           (lambda (result error)
+             ;; A load replaced by a forced one is stale.
+             (when (eq token (gethash key devtools-sql-schema--loading))
+               (remhash key devtools-sql-schema--loading)
+               (if error
+                   (message "devtools: could not load the schema of %s/%s: %s"
+                            profile (plist-get conn :name) (plist-get error :message))
+                 (puthash key (devtools-sql-schema--tables result) devtools-sql-schema--cache)
+                 (when callback (funcall callback))))))
+        ;; The server could not start: nothing is loading.
+        (error (remhash key devtools-sql-schema--loading)
+               (signal (car err) (cdr err)))))))
 
 (defun devtools-sql-schema (conn profile)
   "Return the tables of CONN in PROFILE, loading them if needed.

@@ -105,15 +105,6 @@
 
 ;;; Result buffer
 
-(ert-deftest devtools-test-parse-csv ()
-  (should (equal (devtools-sql-result-parse-csv
-                  "a,b,c\n1,,\"x,\"\"y\"\"\"\n\"l1\nl2\",[NULL],z\n")
-                 '(("a" "b" "c")
-                   ("1" "" "x,\"y\"")
-                   ("l1\nl2" "[NULL]" "z"))))
-  (should (equal (devtools-sql-result-parse-csv "") nil))
-  (should (equal (devtools-sql-result-parse-csv "id\n") '(("id")))))
-
 (defun devtools-test--response (&rest sets)
   "A query/execute reply holding SETS, as the server sends it."
   (list :elapsedMs 1 :results (vconcat sets)))
@@ -236,11 +227,6 @@
                 (kill-buffer))))
         (delete-directory devtools-sql-query-directory t)))))
 
-(ert-deftest devtools-test-psql-args ()
-  (should (equal (devtools-sql--psql-args '(:name "a" :host "h" :port 5433 :user "u" :database "d"))
-                 '("-h" "h" "-p" "5433" "-U" "u" "-d" "d")))
-  (should (equal (devtools-sql--psql-args '(:name "a" :database "d")) '("-d" "d"))))
-
 ;;; Against a running Postgres (DEVTOOLS_PG_PORT)
 
 (defun devtools-test--server-p ()
@@ -362,16 +348,17 @@
 
 ;;; Completion
 
-(defconst devtools-test--schema-csv
-  (concat "table_schema,table_name,table_type,column_name,data_type\n"
-          "public,orders,BASE TABLE,id,integer\n"
-          "public,orders,BASE TABLE,customer,text\n"
-          "public,customers,BASE TABLE,id,integer\n"
-          "public,customers,BASE TABLE,email,text\n"
-          "sales,leads,VIEW,score,numeric\n"))
+(defconst devtools-test--describe-reply
+  '(:tables [(:schema "public" :name "orders" :type "BASE TABLE"
+             :columns [(:name "id" :type "integer") (:name "customer" :type "text")])
+            (:schema "public" :name "customers" :type "BASE TABLE"
+             :columns [(:name "id" :type "integer") (:name "email" :type "text")])
+            (:schema "sales" :name "leads" :type "VIEW"
+             :columns [(:name "score" :type "numeric")])])
+  "A schema/describe reply, as the server sends it.")
 
-(ert-deftest devtools-test-schema-parse ()
-  (should (equal (devtools-sql-schema--parse devtools-test--schema-csv)
+(ert-deftest devtools-test-schema-tables ()
+  (should (equal (devtools-sql-schema--tables devtools-test--describe-reply)
                  '((:schema "public" :name "orders" :type "BASE TABLE"
                     :columns (("id" . "integer") ("customer" . "text")))
                    (:schema "public" :name "customers" :type "BASE TABLE"
@@ -389,7 +376,7 @@
 (defun devtools-test--complete (text)
   "Return the completions at `|' in TEXT, with fake schema data."
   (let ((devtools-sql-schema--cache (make-hash-table :test #'equal)))
-    (puthash '(local . "app") (devtools-sql-schema--parse devtools-test--schema-csv)
+    (puthash '(local . "app") (devtools-sql-schema--tables devtools-test--describe-reply)
              devtools-sql-schema--cache)
     (with-temp-buffer
       (sql-mode)
@@ -438,7 +425,7 @@
     (gethash key devtools-sql-schema--cache)))
 
 (ert-deftest devtools-test-postgres-schema-completion ()
-  (skip-unless (getenv "DEVTOOLS_PG_PORT"))
+  (skip-unless (devtools-test--server-p))
   (let ((devtools-sql-schema--cache (make-hash-table :test #'equal))
         (devtools-sql-schema--loading (make-hash-table :test #'equal)))
     (devtools-test--with-query-file

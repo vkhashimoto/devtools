@@ -92,38 +92,6 @@ ROW counts table lines from 1, skipping rule lines; the header is row 1.")
 (defvar-local devtools-sql-result--table-size nil
   "The result's size as (ROWS . COLUMNS), header row not counted.")
 
-;;; Parsing psql output
-
-(defun devtools-sql-result-parse-csv (text)
-  "Parse TEXT, CSV as printed by psql --csv, into a list of rows.
-Each row is a list of strings."
-  (with-temp-buffer
-    (insert text)
-    (goto-char (point-min))
-    (let (rows row)
-      (while (not (eobp))
-        (push (if (eq (char-after) ?\")
-                  (let ((value "") done)
-                    (forward-char 1)
-                    (while (not done)
-                      (let ((start (point)))
-                        (unless (search-forward "\"" nil t)
-                          (error "Unterminated quoted CSV field"))
-                        (setq value (concat value (buffer-substring start (1- (point)))))
-                        ;; A doubled quote is a literal quote.
-                        (if (eq (char-after) ?\")
-                            (progn (setq value (concat value "\"")) (forward-char 1))
-                          (setq done t))))
-                    value)
-                (buffer-substring (point) (progn (skip-chars-forward "^,\n") (point))))
-              row)
-        (if (eq (char-after) ?,)
-            (forward-char 1)
-          (push (nreverse row) rows)
-          (setq row nil)
-          (unless (eobp) (forward-char 1))))
-      (nreverse rows))))
-
 ;;; Rendering
 
 (defun devtools-sql-result-buffer-name (connection profile)

@@ -18,9 +18,10 @@ Add to `config.org` *after* the magit section (it needs `transient`):
   (devtools-mode 1))
 ```
 
-Emacs must be able to find `psql`: add `postgresql` to your NixOS/home-manager
-packages, or run commands from a buffer whose `.envrc` provides it
-(this repo's `.envrc` loads the flake's dev shell, after `direnv allow`).
+The psql REPL (`C-c d p`) needs `psql` where Emacs can find it: add
+`postgresql` to your NixOS/home-manager packages, or run commands from a buffer
+whose `.envrc` provides it (this repo's `.envrc` loads the flake's dev shell,
+after `direnv allow`).  Everything else goes through devtools-server.
 
 Queries run through **devtools-server** (`server/`, Go).  Build it with Go 1.25
 or later, with or without Nix (`nix develop` provides Go); Go downloads the
@@ -96,9 +97,10 @@ failing line with a caret, plus Postgres' detail and hint.
 
 ### Completion
 
-Tables and columns load in the background when a query file opens (cached per
-environment and connection), and reload after a successful `CREATE`, `ALTER`
-or `DROP`.  What is offered depends on what comes before point:
+Tables and columns load in the background from devtools-server when a query
+file opens (cached per environment and connection), and reload after a
+successful `CREATE`, `ALTER` or `DROP`.  What is offered depends on what comes
+before point:
 
 | Before point      | Candidates                                            |
 |-------------------|-------------------------------------------------------|

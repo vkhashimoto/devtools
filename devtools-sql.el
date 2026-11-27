@@ -13,8 +13,7 @@
 ;; `devtools-sql-connect' opens a psql REPL.  `devtools-sql-query' opens
 ;; a saved .sql file per environment/connection; in it, C-c C-c runs the
 ;; query at point (or the region) through devtools-server and shows the
-;; rows in a result buffer, see `devtools-sql-result-mode'.  Table and
-;; column names for completion are still loaded with psql.
+;; rows in a result buffer, see `devtools-sql-result-mode'.
 
 ;;; Code:
 
@@ -230,58 +229,10 @@ Files are named PROFILE/CONNECTION.sql; for `find-file-hook'."
 
 ;;; Running queries into a result buffer
 
-(defun devtools-sql--psql-args (conn)
-  "Return the psql connection arguments for CONN."
-  (append (when-let* ((host (plist-get conn :host))) (list "-h" host))
-          (when-let* ((port (plist-get conn :port))) (list "-p" (format "%s" port)))
-          (when-let* ((user (plist-get conn :user))) (list "-U" user))
-          (when-let* ((database (plist-get conn :database))) (list "-d" database))))
-
-(defun devtools-sql--drain (buffer)
-  "Read what is left of the process writing to BUFFER, then return its text."
-  (when-let* ((process (get-buffer-process buffer)))
-    (while (accept-process-output process 0.05)))
-  (with-current-buffer buffer (buffer-string)))
-
 (defvar devtools-sql-after-execute-functions nil
   "Functions called after a query run with `devtools-sql-execute' ends.
 Each is called with the connection, the profile, and the command tags
 of the statements (such as \"CREATE TABLE\"), or nil if the run failed.")
-
-(defun devtools-sql-psql-async (conn profile query callback)
-  "Run QUERY on CONN in PROFILE with psql in the background.
-Output is CSV.  When psql exits, call CALLBACK with its exit code, its
-output and its error output.  Return the process."
-  (let* ((program (or (executable-find devtools-sql-psql-program)
-                      (user-error "Cannot find `%s'; install the PostgreSQL client or set `devtools-sql-psql-program'"
-                                  devtools-sql-psql-program)))
-         (stdout (generate-new-buffer " *devtools-sql-output*"))
-         (stderr (generate-new-buffer " *devtools-sql-errors*"))
-         (default-directory (expand-file-name "~/"))
-         (process-environment (append (devtools-sql--environment conn profile)
-                                      process-environment)))
-    (make-process
-     :name "devtools-sql"
-     :buffer stdout
-     :stderr stderr
-     :connection-type 'pipe
-     :command `(,program ,@(devtools-sql--psql-args conn)
-                         ;; No psqlrc, never prompt for a password, CSV
-                         ;; output, and stop at the first error.
-                         "-X" "-w" "--csv" "--pset=null=[NULL]"
-                         "-v" "ON_ERROR_STOP=1" "-v" "SHOW_ALL_RESULTS=off"
-                         "-c" ,query)
-     :sentinel
-     (lambda (process _event)
-       (unless (process-live-p process)
-         (unwind-protect
-             (funcall callback (process-exit-status process)
-                      (devtools-sql--drain stdout)
-                      (devtools-sql--drain stderr))
-           (dolist (buffer (list stdout stderr))
-             (when-let* ((reader (get-buffer-process buffer)))
-               (delete-process reader))
-             (kill-buffer buffer))))))))
 
 (defun devtools-sql--server-params (conn profile)
   "Return the server's connection/open parameters for CONN in PROFILE."
@@ -296,6 +247,20 @@ output and its error output.  Return the process."
 (defun devtools-sql--server-id (conn profile)
   "Return the server's id for CONN in PROFILE."
   (format "%s/%s" profile (plist-get conn :name)))
+
+(defun devtools-sql-server-request (conn profile method params callback)
+  "Send METHOD with PARAMS about CONN in PROFILE to devtools-server.
+The connection is opened first if needed, and PARAMS get its
+:connection.  CALLBACK is called with the result and nil, or with nil
+and the error plist."
+  (let ((id (devtools-sql--server-id conn profile)))
+    (devtools-server-ensure-open
+     id (devtools-sql--server-params conn profile)
+     (lambda (error)
+       (if error
+           (funcall callback nil error)
+         (devtools-server-request method (append (list :connection id) params)
+                                  callback))))))
 
 ;;; Sessions
 
@@ -388,10 +353,9 @@ and the error plist."
                  (devtools-sql--note-session-run session-buffer session result error)
                  (funcall callback result error)))))))
         (t
-         (devtools-server-request
-          "query/execute"
-          (list :connection id :sql sql :maxRows devtools-sql-result-max-rows)
-          callback)))))))
+         (devtools-sql-server-request
+          conn profile "query/execute"
+          (list :sql sql :maxRows devtools-sql-result-max-rows) callback)))))))
 
 (defun devtools-sql-execute (conn profile query &optional session-buffer)
   "Run QUERY on CONN in PROFILE and show the result in a result buffer.

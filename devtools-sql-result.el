@@ -80,8 +80,8 @@
 (put 'devtools-sql-result-rerun 'permanent-local t)
 
 (defvar-local devtools-sql-result--info nil
-  "Plist describing the result: :connection :profile :state :elapsed
-:total-rows.")
+  "Plist describing the result: :connection :profile :sql :state :run
+:elapsed :statements :shown-rows :total-rows.")
 (put 'devtools-sql-result--info 'permanent-local t)
 
 (defvar-local devtools-sql-result--marks nil
@@ -123,19 +123,16 @@ Each row is a list of strings."
           (unless (eobp) (forward-char 1))))
       (nreverse rows))))
 
-(defun devtools-sql-result-status-p (output)
-  "Return non-nil if OUTPUT is a command tag such as \"UPDATE 3\"."
-  (string-match-p "\\`[A-Z][A-Z ]*[A-Z]\\( [0-9]+\\)*\n?\\'" output))
-
 ;;; Rendering
 
 (defun devtools-sql-result-buffer-name (connection profile)
   "Return the result buffer name for CONNECTION in PROFILE."
   (format "*SQL Result: %s/%s*" profile (plist-get connection :name)))
 
-(defun devtools-sql-result-start (connection profile rerun)
+(defun devtools-sql-result-start (connection profile rerun &optional sql)
   "Prepare and show the result buffer for a query on CONNECTION in PROFILE.
-RERUN is a function that runs the query again.  Return the buffer."
+RERUN is a function that runs the query again; SQL is the query, used
+to point at errors.  Return the buffer."
   (with-current-buffer (get-buffer-create (devtools-sql-result-buffer-name connection profile))
     (let ((inhibit-read-only t))
       (devtools-sql-result-mode -1)
@@ -145,7 +142,7 @@ RERUN is a function that runs the query again.  Return the buffer."
       (insert (propertize "Running..." 'face 'shadow)))
     (setq devtools-sql-result-rerun rerun
           devtools-sql-result--info (list :connection connection :profile profile
-                                          :state 'running)
+                                          :sql sql :state 'running)
           header-line-format '(:eval (devtools-sql-result--header-line))
           truncate-lines t)
     (set-buffer-modified-p nil)
@@ -154,52 +151,92 @@ RERUN is a function that runs the query again.  Return the buffer."
     (current-buffer)))
 
 (defun devtools-sql-result--cell-text (value)
-  "Return VALUE made safe for an Org table cell."
-  (string-replace "|" "¦" (string-replace "\n" "↵" value)))
+  "Return VALUE made safe for an Org table cell; nil (NULL) is [NULL]."
+  (if value
+      (string-replace "|" "¦" (string-replace "\n" "↵" value))
+    "[NULL]"))
 
-(defun devtools-sql-result-finish (buffer exit-code output errors elapsed)
-  "Show a finished query in BUFFER.
-EXIT-CODE, OUTPUT and ERRORS come from psql; ELAPSED is in seconds."
+(defun devtools-sql-result--render (buffer state elapsed insert)
+  "Erase BUFFER and call INSERT there to show a finished query.
+STATE is `done' or `failed'; ELAPSED is in seconds.  INSERT returns
+the result's (SHOWN-ROWS . TOTAL-ROWS), or nil when it is no table."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (let ((inhibit-read-only t)
-            (errors (string-trim errors))
-            total)
+            rows)
         (erase-buffer)
-        (cond
-         ((not (zerop exit-code))
-          (insert (propertize (if (string-empty-p errors) "Query failed" errors)
-                              'face 'error)))
-         ((devtools-sql-result-status-p output)
-          (insert (string-trim output)))
-         (t
-          (let ((rows (mapcar (lambda (row) (mapcar #'devtools-sql-result--cell-text row))
-                              (devtools-sql-result-parse-csv output))))
-            (setq total (length (cdr rows)))
-            (when rows
-              (insert (orgtbl-to-orgtbl
-                       (append (list (car rows) 'hline)
-                               (seq-take (cdr rows) devtools-sql-result-max-rows))
-                       nil)
-                      "\n")
-              (goto-char (point-min))
-              (org-table-align)
-              (while (re-search-forward "\\[NULL\\]" nil t)
-                (let ((overlay (make-overlay (match-beginning 0) (match-end 0))))
-                  (overlay-put overlay 'face 'devtools-sql-result-null)
-                  (overlay-put overlay 'devtools-sql-result-null t)))))))
-        ;; Notices and warnings of a successful query.
-        (when (and (zerop exit-code) (not (string-empty-p errors)))
-          (goto-char (point-max))
-          (insert "\n" (propertize errors 'face 'warning)))
+        (setq rows (funcall insert))
         (goto-char (point-min))
         (setq devtools-sql-result--info
-              (plist-put (plist-put (plist-put devtools-sql-result--info
-                                               :state (if (zerop exit-code) 'done 'failed))
-                                    :elapsed elapsed)
-                         :total-rows total))
+              (thread-first devtools-sql-result--info
+                            (plist-put :state state)
+                            (plist-put :elapsed elapsed)
+                            (plist-put :shown-rows (car rows))
+                            (plist-put :total-rows (cdr rows))))
         (set-buffer-modified-p nil)
         (devtools-sql-result-mode 1)))))
+
+(defun devtools-sql-result--insert-table (set)
+  "Insert the result SET as an aligned Org table.
+Return its (SHOWN-ROWS . TOTAL-ROWS)."
+  (let ((header (mapcar (lambda (column)
+                          (devtools-sql-result--cell-text (plist-get column :name)))
+                        (plist-get set :columns)))
+        (rows (mapcar (lambda (row) (mapcar #'devtools-sql-result--cell-text row))
+                      (plist-get set :rows))))
+    (insert (orgtbl-to-orgtbl (append (list header 'hline) rows) nil) "\n")
+    (goto-char (point-min))
+    (org-table-align)
+    (while (re-search-forward "\\[NULL\\]" nil t)
+      (let ((overlay (make-overlay (match-beginning 0) (match-end 0))))
+        (overlay-put overlay 'face 'devtools-sql-result-null)
+        (overlay-put overlay 'devtools-sql-result-null t)))
+    (cons (length rows) (plist-get set :totalRows))))
+
+(defun devtools-sql-result-show (buffer response elapsed)
+  "Show RESPONSE, the server's reply to query/execute, in BUFFER.
+The last statement's result is shown.  ELAPSED is in seconds."
+  (let* ((results (plist-get response :results))
+         (last (and (length> results 0) (aref results (1- (length results))))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (setq devtools-sql-result--info
+              (plist-put devtools-sql-result--info :statements (length results)))))
+    (devtools-sql-result--render
+     buffer 'done elapsed
+     (lambda ()
+       (cond ((null last) (insert (propertize "No statements" 'face 'shadow)) nil)
+             ((plist-get last :columns) (devtools-sql-result--insert-table last))
+             (t (insert (plist-get last :command)) nil))))))
+
+(defun devtools-sql-result--error-context (sql position)
+  "Return the line of SQL holding the character at POSITION (from 1).
+A caret under it points at the character, like psql does."
+  (with-temp-buffer
+    (insert sql)
+    (goto-char (max (point-min) (min position (point-max))))
+    (let ((prefix (format "LINE %d: " (line-number-at-pos)))
+          (column (current-column)))
+      (concat prefix (buffer-substring (line-beginning-position) (line-end-position)) "\n"
+              (make-string (+ (length prefix) column) ?\s) "^"))))
+
+(defun devtools-sql-result-show-error (buffer error elapsed)
+  "Show ERROR, a server error plist (:code :message :data), in BUFFER.
+ELAPSED is in seconds."
+  (devtools-sql-result--render
+   buffer 'failed elapsed
+   (lambda ()
+     (let ((data (plist-get error :data))
+           (sql (plist-get devtools-sql-result--info :sql)))
+       (insert (propertize (concat "ERROR:  " (plist-get error :message)) 'face 'error))
+       (when-let* ((position (plist-get data :position))
+                   ((stringp sql)))
+         (insert "\n" (devtools-sql-result--error-context sql position)))
+       (when-let* ((detail (plist-get data :detail)))
+         (insert "\nDETAIL:  " detail))
+       (when-let* ((hint (plist-get data :hint)))
+         (insert "\nHINT:  " hint))
+       nil))))
 
 (defun devtools-sql-result--clear-overlays ()
   "Remove the overlays added by the result buffer."
@@ -217,12 +254,16 @@ EXIT-CODE, OUTPUT and ERRORS come from psql; ELAPSED is in seconds."
           (pcase (plist-get info :state)
             ('running (funcall off "running..."))
             ('failed (propertize "failed" 'face 'error))
-            (_ (let ((total (plist-get info :total-rows)))
+            (_ (let ((shown (plist-get info :shown-rows))
+                     (total (plist-get info :total-rows))
+                     (statements (or (plist-get info :statements) 0)))
                  (concat (when total
-                           (if (> total devtools-sql-result-max-rows)
-                               (format "first %d of %d rows" devtools-sql-result-max-rows total)
+                           (if (> total shown)
+                               (format "first %d of %d rows" shown total)
                              (format "%d rows" total)))
-                         (format "  %.2fs" (or (plist-get info :elapsed) 0))))))))
+                         (format "  %.2fs" (or (plist-get info :elapsed) 0))
+                         (when (> statements 1)
+                           (funcall off (format "  (last of %d results)" statements)))))))))
     (concat
      (devtools-profile-label (plist-get info :profile))
      " " (plist-get connection :name) "  " summary

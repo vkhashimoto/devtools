@@ -114,33 +114,41 @@
   (should (equal (devtools-sql-result-parse-csv "") nil))
   (should (equal (devtools-sql-result-parse-csv "id\n") '(("id")))))
 
-(ert-deftest devtools-test-status-output ()
-  (should (devtools-sql-result-status-p "UPDATE 3\n"))
-  (should (devtools-sql-result-status-p "INSERT 0 1\n"))
-  (should (devtools-sql-result-status-p "CREATE TABLE\n"))
-  (should-not (devtools-sql-result-status-p "id,name\n1,acme\n"))
-  (should-not (devtools-sql-result-status-p "count\n3\n")))
+(defun devtools-test--response (&rest sets)
+  "A query/execute reply holding SETS, as the server sends it."
+  (list :elapsedMs 1 :results (vconcat sets)))
 
-(defmacro devtools-test--with-result (output &rest body)
-  "Render psql OUTPUT in a result buffer and run BODY there."
+(defun devtools-test--table (columns rows &optional total)
+  "A result set with COLUMNS (names) and ROWS (lists, nil for NULL)."
+  (list :columns (vconcat (mapcar (lambda (name) (list :name name :type "text")) columns))
+        :rows (vconcat (mapcar #'vconcat rows))
+        :totalRows (or total (length rows))
+        :command (format "SELECT %d" (or total (length rows)))))
+
+(defmacro devtools-test--with-result (response &rest body)
+  "Show the server RESPONSE in a result buffer and run BODY there."
   (declare (indent 1))
   `(let ((buffer (save-window-excursion
-                   (devtools-sql-result-start '(:name "app") 'local #'ignore))))
+                   (devtools-sql-result-start '(:name "app") 'local #'ignore "select 1"))))
      (unwind-protect
          (let ((devtools-profiles '((local))))
-           (devtools-sql-result-finish buffer 0 ,output "" 0.1)
+           (devtools-sql-result-show buffer ,response 0.1)
            (with-current-buffer buffer ,@body))
        (kill-buffer buffer))))
 
 (ert-deftest devtools-test-result-table-is-aligned ()
-  (devtools-test--with-result "id,customer,note\n1,acme,[NULL]\n22,globex,a|b\n"
+  (devtools-test--with-result
+      (devtools-test--response
+       (devtools-test--table '("id" "customer" "note")
+                             '(("1" "acme" nil) ("22" "globex" "a|b") ("3" "initech" ""))))
     (should (equal (buffer-string)
                    (concat "| id | customer | note   |\n"
                            "|----+----------+--------|\n"
                            "|  1 | acme     | [NULL] |\n"
-                           "| 22 | globex   | a¦b    |\n")))
+                           "| 22 | globex   | a¦b    |\n"
+                           "|  3 | initech  |        |\n")))
     (should devtools-sql-result-mode)
-    (should (equal devtools-sql-result--table-size '(2 . 3)))
+    (should (equal devtools-sql-result--table-size '(3 . 3)))
     (should truncate-lines)
     (should buffer-read-only)
     (goto-char (point-min))
@@ -148,31 +156,47 @@
     (should (seq-some (lambda (o) (overlay-get o 'devtools-sql-result-null))
                       (overlays-at (1- (point)))))))
 
-(ert-deftest devtools-test-result-status-and-error ()
-  (devtools-test--with-result "UPDATE 3\n"
-    (should (equal (buffer-string) "UPDATE 3")))
+(ert-deftest devtools-test-result-command-and-statements ()
+  (devtools-test--with-result
+      (devtools-test--response (devtools-test--table '("n") '(("1")))
+                               (list :totalRows 0 :command "UPDATE 3"))
+    (should (equal (buffer-string) "UPDATE 3"))
+    (should (string-match-p "(last of 2 results)" (devtools-sql-result--header-line))))
+  (devtools-test--with-result (devtools-test--response)
+    (should (equal (buffer-string) "No statements"))))
+
+(ert-deftest devtools-test-result-error ()
   (let ((buffer (save-window-excursion
-                  (devtools-sql-result-start '(:name "app") 'local #'ignore))))
+                  (devtools-sql-result-start '(:name "app") 'local #'ignore
+                                             "select 1;\nselect nope from orders"))))
     (unwind-protect
         (with-current-buffer buffer
-          (devtools-sql-result-finish buffer 1 "" "ERROR:  boom\n" 0.1)
-          (should (equal (buffer-string) "ERROR:  boom"))
+          (devtools-sql-result-show-error
+           buffer '(:code -32001 :message "column \"nope\" does not exist"
+                    :data (:sqlstate "42703" :position 18 :hint "Check the name."))
+           0.1)
+          (should (equal (buffer-string)
+                         (concat "ERROR:  column \"nope\" does not exist\n"
+                                 "LINE 2: select nope from orders\n"
+                                 "               ^\n"
+                                 "HINT:  Check the name.")))
           (should (eq (plist-get devtools-sql-result--info :state) 'failed))
           ;; `g' and the `?' menu still work after a failure.
           (should (eq (key-binding "g") #'devtools-sql-result-rerun))
           (should (eq (key-binding "?") #'devtools-sql-result-dispatch)))
       (kill-buffer buffer))))
 
-(ert-deftest devtools-test-result-max-rows ()
-  (let ((devtools-sql-result-max-rows 2))
-    (devtools-test--with-result "n\n1\n2\n3\n"
-      (should (equal devtools-sql-result--table-size '(2 . 1)))
-      (should (eq (plist-get devtools-sql-result--info :total-rows) 3))
-      (should (string-match-p "first 2 of 3 rows"
-                              (devtools-sql-result--header-line))))))
+(ert-deftest devtools-test-result-truncated ()
+  (devtools-test--with-result
+      (devtools-test--response (devtools-test--table '("n") '(("1") ("2")) 3))
+    (should (equal devtools-sql-result--table-size '(2 . 1)))
+    (should (eq (plist-get devtools-sql-result--info :total-rows) 3))
+    (should (string-match-p "first 2 of 3 rows" (devtools-sql-result--header-line)))))
 
 (ert-deftest devtools-test-result-copy ()
-  (devtools-test--with-result "id,customer,note\n1,acme,[NULL]\n2,globex,x\n"
+  (devtools-test--with-result
+      (devtools-test--response
+       (devtools-test--table '("id" "customer" "note") '(("1" "acme" nil) ("2" "globex" "x"))))
     (let ((kill-ring nil)
           (devtools-sql-result-copy-null-as "")
           (devtools-sql-result-copy-header nil)
@@ -219,6 +243,10 @@
 
 ;;; Against a running Postgres (DEVTOOLS_PG_PORT)
 
+(defun devtools-test--server-p ()
+  "Non-nil when the demo database and devtools-server are available."
+  (and (getenv "DEVTOOLS_PG_PORT") (executable-find devtools-server-program)))
+
 (defun devtools-test--wait-for-result (buffer)
   "Wait up to 10s for the query in result BUFFER to finish."
   (let ((deadline (+ (float-time) 10)))
@@ -244,7 +272,7 @@
          (delete-directory devtools-sql-query-directory t)))))
 
 (ert-deftest devtools-test-postgres-run-into-result ()
-  (skip-unless (getenv "DEVTOOLS_PG_PORT"))
+  (skip-unless (devtools-test--server-p))
   (devtools-test--with-query-file
     (insert "select id, customer,\n       total\nfrom orders\norder by id;\n\nselect 1;\n")
     (goto-char (point-min))
@@ -265,7 +293,7 @@
         (should (string-match-p "initech" (buffer-string)))))))
 
 (ert-deftest devtools-test-postgres-errors-and-read-only ()
-  (skip-unless (getenv "DEVTOOLS_PG_PORT"))
+  (skip-unless (devtools-test--server-p))
   (devtools-test--with-query-file
     (let ((result-buffer (lambda () (get-buffer "*SQL Result: local/app*"))))
       (save-window-excursion (devtools-sql-run-string "select nope from orders"))
@@ -283,7 +311,7 @@
                      "UPDATE 3")))))
 
 (ert-deftest devtools-test-postgres-rerun-discards-stale-result ()
-  (skip-unless (getenv "DEVTOOLS_PG_PORT"))
+  (skip-unless (devtools-test--server-p))
   (devtools-test--with-query-file
     (save-window-excursion
       (devtools-sql-run-string "select pg_sleep(2), 'slow' as which")
@@ -293,6 +321,27 @@
       (accept-process-output nil 0.3)
       (should (string-match-p "fast" (with-current-buffer result (buffer-string))))
       (should-not (string-match-p "slow" (with-current-buffer result (buffer-string)))))))
+
+(ert-deftest devtools-test-postgres-server-features ()
+  (skip-unless (devtools-test--server-p))
+  (devtools-test--with-query-file
+    (let ((result (lambda () (get-buffer "*SQL Result: local/app*"))))
+      ;; NULL and the empty string differ.
+      (save-window-excursion (devtools-sql-run-string "select null::text as a, '' as b"))
+      (should (eq (devtools-test--wait-for-result (funcall result)) 'done))
+      (should (equal (with-current-buffer (funcall result) (buffer-string))
+                     "| a      | b |\n|--------+---|\n| [NULL] |   |\n"))
+      ;; Errors point at the failing spot.
+      (save-window-excursion (devtools-sql-run-string "select 1;\nselect nope from orders"))
+      (should (eq (devtools-test--wait-for-result (funcall result)) 'failed))
+      (should (string-match-p "^LINE 2: select nope from orders\n +\\^$"
+                              (with-current-buffer (funcall result) (buffer-string))))
+      ;; After the server is stopped, the next query starts it and reopens
+      ;; the connection.
+      (devtools-server-stop)
+      (save-window-excursion (devtools-sql-run-string "select 'back' as state"))
+      (should (eq (devtools-test--wait-for-result (funcall result)) 'done))
+      (should (string-match-p "back" (with-current-buffer (funcall result) (buffer-string)))))))
 
 (ert-deftest devtools-test-postgres-repl ()
   (skip-unless (getenv "DEVTOOLS_PG_PORT"))
@@ -400,7 +449,7 @@
       (should (member "status" (nth 2 (devtools-sql-schema-completion-at-point)))))))
 
 (ert-deftest devtools-test-postgres-schema-reloads-after-ddl ()
-  (skip-unless (getenv "DEVTOOLS_PG_PORT"))
+  (skip-unless (devtools-test--server-p))
   (let ((devtools-sql-schema--cache (make-hash-table :test #'equal))
         (devtools-sql-schema--loading (make-hash-table :test #'equal)))
     (devtools-test--with-query-file

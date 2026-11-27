@@ -22,6 +22,17 @@ Emacs must be able to find `psql`: add `postgresql` to your NixOS/home-manager
 packages, or run commands from a buffer whose `.envrc` provides it
 (this repo's `.envrc` loads the flake's dev shell, after `direnv allow`).
 
+Queries run through **devtools-server** (`server/`, Go).  Build it with Go 1.25
+or later, with or without Nix (`nix develop` provides Go); Go downloads the
+dependencies listed in `server/go.mod`:
+
+```sh
+cd server && go build -o ~/.local/bin/devtools-server .
+```
+
+Emacs needs to find it on `exec-path`, or set `devtools-server-program` to its
+full path.  Emacs starts it on first use.
+
 Passwords live in `~/.authinfo.gpg` (or `~/.authinfo`):
 
 ```
@@ -57,9 +68,32 @@ In a query file (`devtools-sql-query-mode`):
 | `C-M-i`     | Complete table and column names (corfu, company, etc.)       |
 | `M-x devtools-sql-refresh-schema` | Reload the names offered for completion |
 
-Each query runs in its own psql process; with several statements, the result
-of the last one is shown.  Session state (`SET`, temp tables, open
-transactions) does not carry over between runs; use the REPL for that.
+Queries run on a connection pool kept by devtools-server; with several
+statements, the result of the last one is shown.  Session state (`SET`, temp
+tables, open transactions) does not carry over between runs yet; use the REPL
+for that.  NULL shows as `[NULL]`, distinct from an empty string, and errors
+show the failing line with a caret, plus Postgres' detail and hint.
+
+## devtools-server
+
+Emacs and the server talk JSON-RPC 2.0 over the server's stdin/stdout, framed
+like LSP (`Content-Length` headers).  Methods so far:
+
+| Method             | Purpose                                                    |
+|--------------------|------------------------------------------------------------|
+| `initialize`       | Server name, version and drivers                           |
+| `connection/open`  | Open (or replace) a pool: driver, host, port, user, password, database, readOnly |
+| `connection/close` | Close a pool                                               |
+| `query/execute`    | Run SQL; every statement's columns, rows (text, NULL as null) or command tag |
+
+Errors carry Postgres' SQLSTATE, detail, hint and position in `data`.
+
+| Command                        | What it does                                   |
+|--------------------------------|------------------------------------------------|
+| `M-x devtools-server-events`   | Show the JSON-RPC messages exchanged           |
+| `M-x devtools-server-stop`     | Stop the server, closing every connection; the next query starts it again |
+
+The server's own log is in `*devtools-server stderr*`.
 
 ### Completion
 
@@ -116,8 +150,8 @@ hold `|` or newlines, so those show (and copy) as `¦` and `↵`.
 
 | Command           | What it does                                              |
 |-------------------|-----------------------------------------------------------|
-| `nix develop`     | Shell with `psql` and the Postgres server for the demo DB |
-| `nix flake check` | Byte-compiles and runs all tests against a throwaway DB   |
+| `nix develop`     | Shell with `psql`, the Postgres server for the demo DB, and Go |
+| `nix flake check` | Byte-compiles and runs the Emacs tests against a throwaway DB (tests needing devtools-server are skipped) |
 | `nix build`       | Builds the package with the flake's Emacs                 |
 
 To install it through Nix with your own Emacs, add `overlays.default` to your
@@ -128,7 +162,12 @@ which may differ from yours.
 ## Tests
 
 ```sh
-nix flake check                                  # everything, hermetic
+nix flake check                                  # Emacs tests, hermetic, without the server
 ./run-tests.sh                                   # unit tests, using your elpaca packages
 nix develop -c bash -c 'scripts/demo-db.sh start && DEVTOOLS_PG_PORT=54329 ./run-tests.sh'
+(cd server && DEVTOOLS_PG_PORT=54329 go test ./...)   # server tests
 ```
+
+`run-tests.sh` builds devtools-server when Go is available, so the Emacs
+tests can run queries end to end.  `nix flake check` cannot download Go
+modules in its sandbox, so those tests are skipped there.

@@ -229,11 +229,12 @@ STATEMENT-TABLES are the (NAME . ALIAS) pairs of the statement."
      conn profile t
      (lambda () (message "Schema of %s/%s reloaded" profile (plist-get conn :name))))))
 
-(defun devtools-sql-schema--after-execute (conn profile exit-code output)
-  "Reload the schema of CONN in PROFILE after a successful DDL statement.
-EXIT-CODE and OUTPUT come from psql."
-  (when (and (zerop exit-code)
-             (string-match-p "\\`\\(CREATE\\|ALTER\\|DROP\\|COMMENT\\)\\_>" output))
+(defun devtools-sql-schema--after-execute (conn profile commands)
+  "Reload the schema of CONN in PROFILE if COMMANDS include DDL.
+COMMANDS are the command tags of a successful run."
+  (when (seq-some (lambda (command)
+                    (string-match-p "\\`\\(CREATE\\|ALTER\\|DROP\\|COMMENT\\)\\_>" command))
+                  commands)
     (devtools-sql-schema-load conn profile t)))
 
 (defun devtools-sql-schema--setup ()

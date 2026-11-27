@@ -12,8 +12,9 @@
 ;;
 ;; `devtools-sql-connect' opens a psql REPL.  `devtools-sql-query' opens
 ;; a saved .sql file per environment/connection; in it, C-c C-c runs the
-;; query at point (or the region) and shows the rows in a result buffer,
-;; see `devtools-sql-result-mode'.
+;; query at point (or the region) through devtools-server and shows the
+;; rows in a result buffer, see `devtools-sql-result-mode'.  Table and
+;; column names for completion are still loaded with psql.
 
 ;;; Code:
 
@@ -22,6 +23,7 @@
 (require 'pulse)
 (require 'devtools-profiles)
 (require 'devtools-sql-result)
+(require 'devtools-server)
 
 (defcustom devtools-sql-psql-program "psql"
   "Name or path of the psql executable.
@@ -214,8 +216,8 @@ Files are named PROFILE/CONNECTION.sql; for `find-file-hook'."
 
 (defvar devtools-sql-after-execute-functions nil
   "Functions called after a query run with `devtools-sql-execute' ends.
-Each is called with the connection, the profile, psql's exit code and
-its output.")
+Each is called with the connection, the profile, and the command tags
+of the statements (such as \"CREATE TABLE\"), or nil if the run failed.")
 
 (defun devtools-sql-psql-async (conn profile query callback)
   "Run QUERY on CONN in PROFILE with psql in the background.
@@ -252,35 +254,59 @@ output and its error output.  Return the process."
                (delete-process reader))
              (kill-buffer buffer))))))))
 
+(defun devtools-sql--server-params (conn profile)
+  "Return the server's connection/open parameters for CONN in PROFILE."
+  (list :driver "postgres"
+        :host (or (plist-get conn :host) "")
+        :port (or (plist-get conn :port) 0)
+        :user (or (plist-get conn :user) "")
+        :password (or (devtools-sql--password conn) "")
+        :database (or (plist-get conn :database) "")
+        :readOnly (if (devtools-sql--read-only-p conn profile) t :json-false)))
+
+(defun devtools-sql-server-execute (conn profile sql callback)
+  "Run SQL on CONN in PROFILE through devtools-server.
+CALLBACK is called with the server's result and nil, or with nil and
+the error plist."
+  (let ((id (format "%s/%s" profile (plist-get conn :name))))
+    (devtools-server-ensure-open
+     id (devtools-sql--server-params conn profile)
+     (lambda (error)
+       (if error
+           (funcall callback nil error)
+         (devtools-server-request
+          "query/execute"
+          (list :connection id :sql sql :maxRows devtools-sql-result-max-rows)
+          callback))))))
+
 (defun devtools-sql-execute (conn profile query)
   "Run QUERY on CONN in PROFILE and show the result in a result buffer.
-Only the result of the last statement is shown.  Return the process."
-  (let* ((previous (devtools-sql--result-process conn profile))
-         (result (devtools-sql-result-start
-                  conn profile (lambda () (devtools-sql-execute conn profile query))))
-         (started (float-time))
-         process)
-    (when (process-live-p previous)
-      (delete-process previous))
-    (setq process
-          (devtools-sql-psql-async
-           conn profile query
-           (lambda (exit-code output errors)
-             ;; A query that was run again in the meantime is stale.
-             (when (eq process (devtools-sql--result-process conn profile))
-               (devtools-sql-result-finish result exit-code output errors
-                                           (- (float-time) started)))
-             (run-hook-with-args 'devtools-sql-after-execute-functions
-                                 conn profile exit-code output))))
+Only the result of the last statement is shown."
+  ;; Fail before touching the result buffer if the server cannot start.
+  (devtools-server)
+  (let ((result (devtools-sql-result-start
+                 conn profile (lambda () (devtools-sql-execute conn profile query)) query))
+        (started (float-time))
+        (run (list 'run)))
     (with-current-buffer result
-      (setq devtools-sql-result--info
-            (plist-put devtools-sql-result--info :process process)))
-    process))
+      (setq devtools-sql-result--info (plist-put devtools-sql-result--info :run run)))
+    (devtools-sql-server-execute
+     conn profile query
+     (lambda (response error)
+       ;; A query that was run again in the meantime is stale.
+       (when (eq run (devtools-sql--result-run conn profile))
+         (if error
+             (devtools-sql-result-show-error result error (- (float-time) started))
+           (devtools-sql-result-show result response (- (float-time) started))))
+       (run-hook-with-args 'devtools-sql-after-execute-functions conn profile
+                           (and response
+                                (mapcar (lambda (set) (plist-get set :command))
+                                        (plist-get response :results))))))))
 
-(defun devtools-sql--result-process (conn profile)
-  "Return the latest query process of the result buffer of CONN in PROFILE."
+(defun devtools-sql--result-run (conn profile)
+  "Return the token of the latest run in the result buffer of CONN in PROFILE."
   (when-let* ((buffer (get-buffer (devtools-sql-result-buffer-name conn profile))))
-    (plist-get (buffer-local-value 'devtools-sql-result--info buffer) :process)))
+    (plist-get (buffer-local-value 'devtools-sql-result--info buffer) :run)))
 
 (defun devtools-sql-run (start end)
   "Run the query between START and END and show its rows.

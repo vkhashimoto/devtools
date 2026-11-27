@@ -21,6 +21,7 @@
           ./devtools-sql.el
           ./devtools-sql-result.el
           ./devtools-sql-schema.el
+          ./devtools-server.el
           ./devtools-menu.el
           ./examples
           ./scripts

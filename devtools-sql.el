@@ -271,10 +271,13 @@ The default file is not among them."
          (mapcar #'file-name-base (directory-files dir nil "\\.sql\\'")))))
 
 (defun devtools-sql--read-query-name (conn profile)
-  "Ask for the name of a query file of CONN in PROFILE, new or existing."
-  (let ((name (string-trim
-               (completing-read (format "Query file of %s/%s: " profile (plist-get conn :name))
-                                (devtools-sql--query-names conn profile)))))
+  "Ask for the name of a query file of CONN in PROFILE, new or existing.
+A \".sql\" typed at the end is dropped: the file gets it anyway."
+  (let ((name (string-remove-suffix
+               ".sql"
+               (string-trim
+                (completing-read (format "Query file of %s/%s: " profile (plist-get conn :name))
+                                 (devtools-sql--query-names conn profile))))))
     (when (or (string-empty-p name) (string-search "/" name))
       (user-error "A query file name cannot be empty or contain a slash"))
     name))

@@ -780,6 +780,11 @@
   (devtools-test--with-profiles
     (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) " cleanup ")))
       (should (equal (devtools-sql--read-query-name (devtools-test--conn 'local "app") 'local) "cleanup")))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "banana.sql")))
+      (should (equal (devtools-sql--read-query-name (devtools-test--conn 'local "app") 'local) "banana")))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) ".sql")))
+      (should-error (devtools-sql--read-query-name (devtools-test--conn 'local "app") 'local)
+                    :type 'user-error))
     (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "a/b")))
       (should-error (devtools-sql--read-query-name (devtools-test--conn 'local "app") 'local)
                     :type 'user-error))))

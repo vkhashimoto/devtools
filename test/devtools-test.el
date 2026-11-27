@@ -1078,4 +1078,58 @@
       (devtools-sql--mark-buffer (devtools-test--conn 'prod "writer") 'prod)
       (should (string-match-p "(default prod)" (devtools-menu--environment-description))))))
 
+;;; Running again from the result buffer
+
+(ert-deftest devtools-test-read-only-query-p ()
+  (dolist (sql '("select 1"
+                 "SELECT * FROM orders WHERE note = 'delete me'; show search_path"
+                 "with t as (select 1) select * from t"
+                 "explain select * from orders"
+                 "values (1), (2)"
+                 "table orders"
+                 "-- update orders set x = 1\nselect 1"
+                 "/* drop table orders */ select \"update\" from t"
+                 "select $$ insert into x $$, $tag$ delete $tag$"
+                 "select 'it''s; update orders' as s"))
+    (should (devtools-sql-read-only-query-p sql)))
+  (dolist (sql '("update orders set status = 'x'"
+                 "select 1; delete from orders"
+                 "with gone as (delete from orders returning *) select * from gone"
+                 "select * into backup from orders"
+                 "explain analyze delete from orders"
+                 "select * from orders for update"
+                 "insert into orders values (1)"
+                 "set search_path = x"
+                 "begin"
+                 ""
+                 "-- only a comment"))
+    (should-not (devtools-sql-read-only-query-p sql))))
+
+(defmacro devtools-test--with-rerun (sql &rest body)
+  "Run BODY in a result buffer for SQL whose re-run sets `ran'."
+  (declare (indent 1))
+  `(let ((ran nil)
+         (devtools-profiles '((local))))
+     (with-temp-buffer
+       (setq devtools-sql-result--info (list :sql ,sql)
+             devtools-sql-result--rerun-function (lambda () (setq ran t)))
+       ,@body)))
+
+(ert-deftest devtools-test-rerun-setting ()
+  (let ((devtools-sql-result-allow-rerun 'reads))
+    (devtools-test--with-rerun "select 1"
+      (devtools-sql-result-rerun)
+      (should ran))
+    (devtools-test--with-rerun "update orders set status = status"
+      (should-error (devtools-sql-result-rerun) :type 'user-error)
+      (should-not ran)))
+  (let ((devtools-sql-result-allow-rerun 'all))
+    (devtools-test--with-rerun "update orders set status = status"
+      (devtools-sql-result-rerun)
+      (should ran)))
+  (let ((devtools-sql-result-allow-rerun nil))
+    (devtools-test--with-rerun "select 1"
+      (should-error (devtools-sql-result-rerun) :type 'user-error)
+      (should-not ran))))
+
 ;;; devtools-test.el ends here

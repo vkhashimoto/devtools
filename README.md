@@ -195,7 +195,7 @@ In a result buffer (`devtools-sql-result-mode`):
 | `N`       | Copy NULL as nothing / as `NULL`                              |
 | `H`       | Copy column names too                                         |
 | `D`       | Choose the delimiter between copied cells                     |
-| `g`       | Run the query again                                           |
+| `g`       | Run the query again; by default only queries that read (`devtools-sql-result-allow-rerun`) |
 | `q`       | Close the window                                              |
 | `?`       | Menu with all of the above (like magit's `?`)               |
 
@@ -240,6 +240,9 @@ The server's own log is in `*devtools-server stderr*`.
 - `devtools-sql-query-files-use-session`: query files run on a session (default) or the pool.
 - `devtools-sql-query-directory`: where query files are saved.
 - `devtools-sql-result-max-rows`: rows shown in a result buffer (default 1000).
+- `devtools-sql-result-allow-rerun`: which queries `g` runs again: `reads` (default:
+  SELECT, WITH, SHOW, EXPLAIN, VALUES, TABLE without a write inside), `all`, or nil
+  (off).  A function called from a SELECT can still have side effects (`nextval`).
 - `devtools-sql-result-copy-delimiter`, `-copy-header`, `-copy-null-as`: copy defaults.
 - Faces `devtools-profile` / `devtools-production` / `devtools-sql-result-*`.
 - Menu entries: `transient-append-suffix`, `transient-suffix-put`, etc.

@@ -12,7 +12,8 @@
 ;;   w    copy marked cells (or the cell at point)
 ;;   W    copy the row           N    copy NULL as nothing / NULL
 ;;   H    copy column names too  D    choose the delimiter
-;;   g    run the query again    ?    menu with all of the above
+;;   g    run the query again (see `devtools-sql-result-allow-rerun')
+;;   ?    menu with all of the above
 ;;
 ;; NULL cells show as [NULL]; an empty string shows as an empty cell.
 ;; Org tables cannot hold `|' or newlines, so those are shown (and
@@ -29,6 +30,18 @@
 (defcustom devtools-sql-result-max-rows 1000
   "Maximum number of rows shown in a result buffer."
   :type 'natnum
+  :group 'devtools)
+
+(defcustom devtools-sql-result-allow-rerun 'reads
+  "Which queries \\<devtools-sql-result-mode-map>\\[devtools-sql-result-rerun] in a result buffer runs again.
+`reads': only queries that read (SELECT, WITH, SHOW, EXPLAIN, VALUES,
+TABLE, without a write inside); others are refused, to be run again
+from their file.  `all': any query.  nil: none, the key is off.
+A function called from a SELECT can still have side effects (nextval,
+for instance); those are not detected."
+  :type '(choice (const :tag "Only queries that read" reads)
+                 (const :tag "Any query" all)
+                 (const :tag "None" nil))
   :group 'devtools)
 
 (defcustom devtools-sql-result-copy-null-as ""
@@ -75,9 +88,9 @@
 
 (defvar devtools-sql-result-mode)
 
-(defvar-local devtools-sql-result-rerun nil
+(defvar-local devtools-sql-result--rerun-function nil
   "Function called with no arguments to run the query again.")
-(put 'devtools-sql-result-rerun 'permanent-local t)
+(put 'devtools-sql-result--rerun-function 'permanent-local t)
 
 (defvar-local devtools-sql-result--info nil
   "Plist describing the result: :connection :profile :name :sql :state :run
@@ -112,7 +125,7 @@ file.  Return the buffer."
       (erase-buffer)
       (org-mode)
       (insert (propertize "Running..." 'face 'shadow)))
-    (setq devtools-sql-result-rerun rerun
+    (setq devtools-sql-result--rerun-function rerun
           devtools-sql-result--info (list :connection connection :profile profile
                                           :name name :sql sql :state 'running)
           header-line-format '(:eval (devtools-sql-result--header-line))
@@ -519,12 +532,74 @@ With `devtools-sql-result-copy-header' set, start with the names of COLUMNS."
   (interactive "p")
   (devtools-sql-result-next-column (- (or count 1))))
 
+(defun devtools-sql-result--strip-sql (sql)
+  "Return SQL without its comments, string literals and quoted names.
+What remains is keywords and plain names, safe to look for words in."
+  (with-temp-buffer
+    (insert sql)
+    (goto-char (point-min))
+    (let (parts)
+      (while (not (eobp))
+        (let ((start (point)))
+          (skip-chars-forward "^-/$'\"")
+          (push (buffer-substring start (point)) parts))
+        (cond
+         ((eobp))
+         ((looking-at "--")
+          (forward-line 1)
+          (push "\n" parts))
+         ((looking-at "/\\*")
+          (goto-char (or (search-forward "*/" nil t) (point-max)))
+          (push " " parts))
+         ((looking-at "\\$[A-Za-z_0-9]*\\$")
+          (let ((tag (match-string 0)))
+            (goto-char (match-end 0))
+            (goto-char (or (search-forward tag nil t) (point-max))))
+          (push " x " parts))
+         ((looking-at "['\"]")
+          ;; A doubled quote inside is part of the literal or name.
+          (let ((quote (char-after)) done)
+            (forward-char 1)
+            (while (and (not done) (not (eobp)))
+              (cond ((not (eq (char-after) quote)) (forward-char 1))
+                    ((eq (char-after (1+ (point))) quote) (forward-char 2))
+                    (t (forward-char 1) (setq done t)))))
+          (push " x " parts))
+         (t
+          (push (char-to-string (char-after)) parts)
+          (forward-char 1))))
+      (apply #'concat (nreverse parts)))))
+
+(defun devtools-sql-read-only-query-p (sql)
+  "Return non-nil if every statement of SQL only reads.
+Each must start with SELECT, WITH, SHOW, EXPLAIN, VALUES or TABLE and
+hold no write: a data-changing WITH, SELECT INTO, EXPLAIN ANALYZE or
+SELECT FOR UPDATE make it a write.  When unsure, it is not a read."
+  (let ((statements (seq-remove #'string-blank-p
+                                (split-string (devtools-sql-result--strip-sql (or sql "")) ";"))))
+    (and statements
+         (seq-every-p
+          (lambda (statement)
+            (let ((words (split-string (downcase statement) "[^a-z_0-9]+" t)))
+              (and (member (car words) '("select" "with" "show" "explain" "values" "table"))
+                   (not (seq-intersection (cdr words)
+                                          '("insert" "update" "delete" "merge" "into"
+                                            "truncate" "analyze" "analyse"))))))
+          statements))))
+
 (defun devtools-sql-result-rerun ()
-  "Run the query of this result buffer again."
+  "Run the query of this result buffer again.
+`devtools-sql-result-allow-rerun' says which queries it runs."
   (interactive)
-  (unless devtools-sql-result-rerun
+  (cond
+   ((null devtools-sql-result-allow-rerun)
+    (user-error "Running again from the result buffer is off; see `devtools-sql-result-allow-rerun'"))
+   ((null devtools-sql-result--rerun-function)
     (user-error "No query to run again"))
-  (funcall devtools-sql-result-rerun))
+   ((and (eq devtools-sql-result-allow-rerun 'reads)
+         (not (devtools-sql-read-only-query-p (plist-get devtools-sql-result--info :sql))))
+    (user-error "Not running again: the query may change data; run it from its file instead"))
+   (t (funcall devtools-sql-result--rerun-function))))
 
 ;;; Menu
 
@@ -568,7 +643,8 @@ With `devtools-sql-result-copy-header' set, start with the names of COLUMNS."
     ("D" devtools-sql-result-set-copy-delimiter
      :description devtools-sql-result--delimiter-description)]
    ["Query"
-    ("g" "Run again" devtools-sql-result-rerun)
+    ("g" "Run again" devtools-sql-result-rerun
+     :if (lambda () devtools-sql-result-allow-rerun))
     ("q" "Close window" quit-window)]])
 
 ;;; Mode

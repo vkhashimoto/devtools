@@ -210,8 +210,11 @@ STATEMENT-TABLES are the (NAME . ALIAS) pairs of the statement."
   (interactive)
   (unless devtools-sql-connection
     (user-error "Buffer is not linked to a connection"))
-  (let ((conn devtools-sql-connection)
-        (profile devtools-sql-profile))
+  (let* ((profile devtools-sql-profile)
+         (conn (devtools-sql--current-connection devtools-sql-connection profile)))
+    (setq devtools-sql-connection conn)
+    (devtools-server)
+    (devtools-sql--refresh-connection conn profile)
     (devtools-sql-schema-load
      conn profile t
      (lambda () (message "Schema of %s/%s reloaded" profile (plist-get conn :name))))))

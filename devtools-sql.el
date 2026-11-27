@@ -325,6 +325,121 @@ RESULT or ERROR is the server's reply."
         devtools-sql--tx-status nil))
 (put 'devtools-sql--close-session 'permanent-local-hook t)
 
+;;; Keeping connections up to date with the profiles
+
+(defun devtools-sql--current-connection (conn profile)
+  "Return CONN as PROFILE currently defines it, found by name.
+Query buffers keep the connection they were linked with; the profile
+may have been edited since.  Return CONN if it is no longer there."
+  (or (seq-find (lambda (c) (equal (plist-get c :name) (plist-get conn :name)))
+                (devtools-env :postgres profile))
+      conn))
+
+(defconst devtools-sql--setting-labels
+  '((:host . "host") (:port . "port") (:user . "user") (:database . "database")
+    (:readOnly . "read-only"))
+  "Connection settings that need a new connection when they change.")
+
+(defun devtools-sql--setting-text (key value)
+  "Return VALUE of the setting KEY as shown to the user."
+  (cond ((eq key :readOnly) (if (eq value t) "on" "off"))
+        ((member value '("" 0 nil)) "default")
+        (t (format "%s" value))))
+
+(defun devtools-sql--settings-changes (old new)
+  "Describe how the settings changed from OLD to NEW server parameters.
+Return nil when they are the same, the password aside."
+  (let (changes)
+    (pcase-dolist (`(,key . ,label) devtools-sql--setting-labels)
+      (let ((before (plist-get old key))
+            (after (plist-get new key)))
+        (unless (equal before after)
+          (push (format "%s: %s → %s" label
+                        (devtools-sql--setting-text key before)
+                        (devtools-sql--setting-text key after))
+                changes))))
+    (and changes (string-join (nreverse changes) ", "))))
+
+(defun devtools-sql--session-buffers (id)
+  "Return the query buffers with a session on the server connection ID."
+  (seq-filter (lambda (buffer)
+                (with-current-buffer buffer
+                  (and devtools-sql--session
+                       (eql (car devtools-sql--session) (devtools-server-generation))
+                       devtools-sql-connection
+                       (equal (devtools-sql--server-id devtools-sql-connection
+                                                       devtools-sql-profile)
+                              id))))
+              (buffer-list)))
+
+(defun devtools-sql--count-text (names singular plural)
+  "Return \"SINGULAR a\" or \"PLURAL a, b\" for NAMES, or nil if none."
+  (when (length> names 0)
+    (format "%s %s" (if (length= names 1) singular plural)
+            (string-join (append names nil) ", "))))
+
+(defun devtools-sql--session-state-text (buffer)
+  "Describe what the session of BUFFER holds, or return nil if nothing."
+  (let* ((reply (devtools-server-call "session/state"
+                                      (list :session (cdr (buffer-local-value
+                                                           'devtools-sql--session buffer)))))
+         (state (plist-get reply :result))
+         (error (plist-get reply :error)))
+    (cond
+     ;; Already gone: nothing to lose.
+     ((eql (plist-get error :code) -32003) nil)
+     ((eql (plist-get error :code) -32004) "a query running")
+     (error (format "unknown state (%s)" (plist-get error :message)))
+     (t
+      (let ((parts
+             (delq nil
+                   (list (pcase (plist-get state :transaction)
+                           ("transaction" "open transaction")
+                           ("failed" "failed transaction"))
+                         (devtools-sql--count-text (plist-get state :tempTables)
+                                                   "temp table" "temp tables")
+                         (devtools-sql--count-text (plist-get state :settings) "SET" "SET")
+                         (devtools-sql--count-text (plist-get state :prepared)
+                                                   "prepared statement" "prepared statements")
+                         (devtools-sql--count-text (plist-get state :cursors) "cursor" "cursors")
+                         (devtools-sql--count-text (plist-get state :listening) "LISTEN" "LISTEN")
+                         (let ((locks (or (plist-get state :advisoryLocks) 0)))
+                           (when (> locks 0)
+                             (format "%d advisory lock%s" locks (if (= locks 1) "" "s"))))))))
+        (and parts (string-join parts ", ")))))))
+
+(defun devtools-sql--refresh-connection (conn profile)
+  "Bring the server connection of CONN in PROFILE up to date, if open.
+Called before interactive runs.  A new password is passed on without
+closing anything.  Other changes need a new connection, which closes
+its sessions: that happens at once if no session holds state, else
+only if the user agrees; otherwise the current connection stays."
+  (let* ((id (devtools-sql--server-id conn profile))
+         (old (devtools-server-opened-params id))
+         (new (devtools-sql--server-params conn profile)))
+    (when (and old (not (equal old new)))
+      (let ((changes (devtools-sql--settings-changes old new)))
+        (if (null changes)
+            (devtools-server-open id new)
+          (let* ((buffers (devtools-sql--session-buffers id))
+                 (held (delq nil (mapcar (lambda (buffer)
+                                           (when-let* ((text (devtools-sql--session-state-text buffer)))
+                                             (format "  %s: %s" (buffer-name buffer) text)))
+                                         buffers))))
+            (if (and held
+                     (not (y-or-n-p
+                           (format "Settings of %s changed (%s).  Reopening loses:\n%s\nReopen now? "
+                                   id changes (string-join held "\n")))))
+                (message "devtools: %s keeps its current connection and settings" id)
+              (devtools-server-open id new)
+              ;; The server closed their sessions; the next runs open new ones.
+              (dolist (buffer buffers)
+                (with-current-buffer buffer
+                  (setq devtools-sql--session nil
+                        devtools-sql--tx-status nil)
+                  (force-mode-line-update)))
+              (message "devtools: reopened %s (%s)" id changes))))))))
+
 ;;; Running queries
 
 (defun devtools-sql-server-execute (conn profile sql callback &optional session-buffer)
@@ -367,6 +482,11 @@ pool.  Only the result of the last statement is shown."
                 (substitute-command-keys "\\[universal-argument] \\[devtools-sql-run]")))
   ;; Fail before touching the result buffer if the server cannot start.
   (devtools-server)
+  (setq conn (devtools-sql--current-connection conn profile))
+  (when (buffer-live-p session-buffer)
+    (with-current-buffer session-buffer
+      (setq devtools-sql-connection conn)))
+  (devtools-sql--refresh-connection conn profile)
   (let ((result (devtools-sql-result-start
                  conn profile
                  (lambda ()

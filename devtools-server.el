@@ -81,11 +81,13 @@ a plist (:code :message :data)."
                          :timeout nil))
 
 (defun devtools-server-ensure-open (id params callback)
-  "Open the connection ID with PARAMS unless it is open with them.
-CALLBACK is called with nil once it is open, or with the error."
+  "Open the connection ID with PARAMS unless it is open.
+CALLBACK is called with nil once it is open, or with the error.  An
+open connection is used as it is, even if PARAMS differ: reopening it
+can close sessions, so it is left to `devtools-server-open'."
   ;; Starting the server first forgets the connections of a dead one.
   (devtools-server)
-  (if (equal (gethash id devtools-server--opened) params)
+  (if (gethash id devtools-server--opened)
       (funcall callback nil)
     (devtools-server-request
      "connection/open" (append (list :id id) params)
@@ -93,6 +95,31 @@ CALLBACK is called with nil once it is open, or with the error."
        (unless error
          (puthash id params devtools-server--opened))
        (funcall callback error)))))
+
+(defun devtools-server-opened-params (id)
+  "Return the parameters the connection ID is open with, or nil."
+  (and (devtools-server-running-p)
+       (gethash id devtools-server--opened)))
+
+(defun devtools-server-call (method params)
+  "Send METHOD with PARAMS to the server and wait for its result.
+Return (:result RESULT) or (:error ERROR), ERROR being a plist (:code
+:message :data)."
+  (condition-case err
+      (list :result (jsonrpc-request (devtools-server) method params :timeout 20))
+    (jsonrpc-error
+     (list :error (list :code (alist-get 'jsonrpc-error-code (cdr err))
+                        :message (alist-get 'jsonrpc-error-message (cdr err))
+                        :data (alist-get 'jsonrpc-error-data (cdr err)))))))
+
+(defun devtools-server-open (id params)
+  "Open, or reopen, the connection ID with PARAMS and wait.
+Reopening with other settings than the password closes its sessions.
+Signal a `user-error' if it fails."
+  (let ((reply (devtools-server-call "connection/open" (append (list :id id) params))))
+    (when-let* ((error (plist-get reply :error)))
+      (user-error "Could not open %s: %s" id (plist-get error :message)))
+    (puthash id params devtools-server--opened)))
 
 (defun devtools-server-events ()
   "Show the JSON-RPC messages exchanged with the server."

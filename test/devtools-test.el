@@ -278,27 +278,48 @@
         (should (eq (devtools-test--wait-for-result result) 'done))
         (should (string-match-p "initech" (buffer-string)))))))
 
+(defun devtools-test--server-call (method params)
+  "Send METHOD with PARAMS to the server and wait; return (RESULT . ERROR)."
+  (let (reply)
+    (devtools-server-request method params (lambda (result error) (setq reply (cons result error))))
+    (let ((deadline (+ (float-time) 10)))
+      (while (and (not reply) (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    reply))
+
+(defun devtools-test--run (query &optional other)
+  "Run QUERY in the current query buffer, wait, and return the result buffer."
+  (save-window-excursion (devtools-sql-run-string query other))
+  (let ((result (get-buffer "*SQL Result: local/app*")))
+    (devtools-test--wait-for-result result)
+    result))
+
+(defun devtools-test--result-text (buffer)
+  (with-current-buffer buffer (buffer-string)))
+
+(defun devtools-test--result-header (buffer)
+  (with-current-buffer buffer (devtools-sql-result--header-line)))
+
+(defun devtools-test--change-local-app (key value)
+  "Set KEY to VALUE in the local/app connection of the profiles."
+  (setq devtools-profiles (copy-tree devtools-profiles))
+  (let ((conns (plist-get (cdr (assq 'local devtools-profiles)) :postgres)))
+    (setcar conns (plist-put (copy-sequence (car conns)) key value))))
+
 (ert-deftest devtools-test-postgres-errors-and-read-only ()
   (skip-unless (devtools-test--server-p))
   (devtools-test--with-query-file
-    (let ((result-buffer (lambda () (get-buffer "*SQL Result: local/app*"))))
-      (save-window-excursion (devtools-sql-run-string "select nope from orders"))
-      (should (eq (devtools-test--wait-for-result (funcall result-buffer)) 'failed))
-      (should (string-match-p "column \"nope\" does not exist"
-                              (with-current-buffer (funcall result-buffer) (buffer-string))))
-      (save-window-excursion
-        (devtools-sql-execute (append '(:read-only t) conn) 'local "delete from orders"))
-      (should (eq (devtools-test--wait-for-result (funcall result-buffer)) 'failed))
+    (let ((result (devtools-test--run "select nope from orders")))
+      (should (eq (plist-get (buffer-local-value 'devtools-sql-result--info result) :state) 'failed))
+      (should (string-match-p "column \"nope\" does not exist" (devtools-test--result-text result)))
+      ;; Made read-only in the profile: the next run reopens (no session
+      ;; state to lose, so without asking) and writes are refused.
+      (devtools-test--change-local-app :read-only t)
       (should (string-match-p "read-only transaction"
-                              (with-current-buffer (funcall result-buffer) (buffer-string))))
-      ;; Reopening the connection with other settings closed its sessions.
-      (save-window-excursion (devtools-sql-run-string "update orders set status = status"))
-      (should (eq (devtools-test--wait-for-result (funcall result-buffer)) 'failed))
-      (should (string-match-p "Run again to start a new session"
-                              (with-current-buffer (funcall result-buffer) (buffer-string))))
-      (save-window-excursion (devtools-sql-run-string "update orders set status = status"))
-      (should (eq (devtools-test--wait-for-result (funcall result-buffer)) 'done))
-      (should (equal (with-current-buffer (funcall result-buffer) (buffer-string))
+                              (devtools-test--result-text (devtools-test--run "delete from orders"))))
+      (should (string-match-p "read-only" (devtools-sql--header-line)))
+      (devtools-test--change-local-app :read-only nil)
+      (should (equal (devtools-test--result-text (devtools-test--run "update orders set status = status"))
                      "UPDATE 3")))))
 
 (ert-deftest devtools-test-postgres-rerun-discards-stale-result ()
@@ -487,28 +508,6 @@
                                                :tx "transaction"))
     (should (string-match-p "session · in transaction" (devtools-sql-result--header-line)))))
 
-(defun devtools-test--server-call (method params)
-  "Send METHOD with PARAMS to the server and wait; return (RESULT . ERROR)."
-  (let (reply)
-    (devtools-server-request method params (lambda (result error) (setq reply (cons result error))))
-    (let ((deadline (+ (float-time) 10)))
-      (while (and (not reply) (< (float-time) deadline))
-        (accept-process-output nil 0.05)))
-    reply))
-
-(defun devtools-test--run (query &optional other)
-  "Run QUERY in the current query buffer, wait, and return the result buffer."
-  (save-window-excursion (devtools-sql-run-string query other))
-  (let ((result (get-buffer "*SQL Result: local/app*")))
-    (devtools-test--wait-for-result result)
-    result))
-
-(defun devtools-test--result-text (buffer)
-  (with-current-buffer buffer (buffer-string)))
-
-(defun devtools-test--result-header (buffer)
-  (with-current-buffer buffer (devtools-sql-result--header-line)))
-
 (ert-deftest devtools-test-postgres-session-keeps-state ()
   (skip-unless (devtools-test--server-p))
   (devtools-test--with-query-file
@@ -591,5 +590,111 @@
       (should (string-match-p "  pool" (devtools-test--result-header (devtools-test--run "select 1"))))
       (should-not devtools-sql--session)
       (should (string-match-p "  session" (devtools-test--result-header (devtools-test--run "select 1" t)))))))
+
+;;; Profile changes and open connections
+
+(ert-deftest devtools-test-settings-changes ()
+  (let ((old '(:driver "postgres" :host "localhost" :port 54329 :user "dev"
+               :password "a" :database "app" :readOnly :json-false)))
+    (should-not (devtools-sql--settings-changes old old))
+    (should-not (devtools-sql--settings-changes old (plist-put (copy-sequence old) :password "b")))
+    (should (equal (devtools-sql--settings-changes old (plist-put (copy-sequence old) :readOnly t))
+                   "read-only: off → on"))
+    (should (equal (devtools-sql--settings-changes
+                    old (thread-first (copy-sequence old)
+                                      (plist-put :host "pg.staging") (plist-put :port 0)))
+                   "host: localhost → pg.staging, port: 54329 → default"))))
+
+(ert-deftest devtools-test-current-connection ()
+  (devtools-test--with-profiles
+    (let ((linked (devtools-test--conn 'local "app")))
+      (devtools-test--change-local-app :read-only t)
+      (should (eq (plist-get (devtools-sql--current-connection linked 'local) :read-only) t))
+      ;; A connection no longer in the profile stays as it was.
+      (let ((gone (list :name "gone")))
+        (should (eq (devtools-sql--current-connection gone 'local) gone))))))
+
+(defmacro devtools-test--answering (answer &rest body)
+  "Run BODY with `y-or-n-p' answering ANSWER; return the prompts asked."
+  (declare (indent 1))
+  `(let (prompts)
+     (cl-letf (((symbol-function 'y-or-n-p)
+                (lambda (prompt) (push prompt prompts) ,answer)))
+       ,@body)
+     (nreverse prompts)))
+
+(ert-deftest devtools-test-postgres-reopen-without-state-is-silent ()
+  (skip-unless (devtools-test--server-p))
+  (devtools-test--with-query-file
+    (devtools-test--run "select 1")
+    (let ((session (cdr devtools-sql--session)))
+      (devtools-test--change-local-app :read-only t)
+      (should-not (devtools-test--answering nil
+                    ;; A new session, without any "session gone" error.
+                    (should (string-match-p "read-only"
+                                            (devtools-test--result-text
+                                             (devtools-test--run "delete from orders where false"))))))
+      (should-not (equal (cdr devtools-sql--session) session)))))
+
+(ert-deftest devtools-test-postgres-reopen-with-state-asks ()
+  (skip-unless (devtools-test--server-p))
+  (devtools-test--with-query-file
+    (devtools-test--run "create temp table notes (x int); begin")
+    (let ((session (cdr devtools-sql--session)))
+      (devtools-test--change-local-app :read-only t)
+      ;; Declined: same session, old settings, transaction still open.
+      (let ((prompts (devtools-test--answering nil
+                       (devtools-test--run "insert into notes values (1)"))))
+        (should (length= prompts 1))
+        (should (string-match-p "Settings of local/app changed (read-only: off → on)" (car prompts)))
+        (should (string-match-p "app.sql: open transaction, temp table notes" (car prompts))))
+      (should (equal (cdr devtools-sql--session) session))
+      (should (equal devtools-sql--tx-status "transaction"))
+      ;; Asked again on the next run; accepted: a new session, read-only.
+      (should (length= (devtools-test--answering t (devtools-test--run "select 1")) 1))
+      (should-not (equal (cdr devtools-sql--session) session))
+      (should (equal devtools-sql--tx-status "idle"))
+      (should (string-match-p "read-only"
+                              (devtools-test--result-text
+                               (devtools-test--run "delete from orders where false")))))))
+
+(ert-deftest devtools-test-postgres-password-change-keeps-session ()
+  (skip-unless (devtools-test--server-p))
+  (devtools-test--with-query-file
+    (let ((authinfo (car auth-sources))
+          (port (getenv "DEVTOOLS_PG_PORT")))
+      (unwind-protect
+          (progn
+            (devtools-test--run "create temp table notes (x int)")
+            (let ((session (cdr devtools-sql--session)))
+              (devtools-test--run "alter role dev password 'rotated'")
+              (with-temp-file authinfo
+                (insert (format "machine localhost port %s login dev password rotated\n" port)))
+              (auth-source-forget-all-cached)
+              (should-not (devtools-test--answering nil
+                            (should (string-match-p "| x |" (devtools-test--result-text
+                                                             (devtools-test--run "select * from notes"))))))
+              (should (equal (cdr devtools-sql--session) session))
+              ;; New connections use the new password.
+              (should (equal (devtools-test--result-text (devtools-test--run "select 'pool' as via" t))
+                             "| via  |\n|------|\n| pool |\n"))))
+        (devtools-server-call "query/execute" (list :connection "local/app"
+                                                    :sql "alter role dev password 'devpass'"))
+        (with-temp-file authinfo
+          (insert (format "machine localhost port %s login dev password devpass\n" port)))
+        (auth-source-forget-all-cached)))))
+
+(ert-deftest devtools-test-postgres-background-never-reopens ()
+  (skip-unless (devtools-test--server-p))
+  (let ((devtools-sql-schema--cache (make-hash-table :test #'equal))
+        (devtools-sql-schema--loading (make-hash-table :test #'equal)))
+    (devtools-test--with-query-file
+      (devtools-test--run "begin")
+      (devtools-test--change-local-app :read-only t)
+      (should-not (devtools-test--answering nil
+                    (devtools-sql-schema-load (devtools-sql--current-connection conn 'local) 'local t)
+                    (devtools-test--wait-for-schema conn 'local)))
+      (should (eq (plist-get (devtools-server-opened-params "local/app") :readOnly) :json-false))
+      (should (equal devtools-sql--tx-status "transaction")))))
 
 ;;; devtools-test.el ends here

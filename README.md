@@ -79,12 +79,36 @@ the last one is shown.
   show "in transaction" or "transaction failed", so an open transaction on
   prod is hard to miss.  A session runs one query at a time: while it is busy,
   `C-c C-c` refuses and `C-u C-c C-c` runs on the pool instead.  If the server
-  stops, or the connection is reopened with other settings (profile changed),
-  the session and its state are gone; the next run says so and starts a new
-  one.
+  stops, the session and its state are gone; the next run says so and starts
+  a new one.
 - **Pool**: each run borrows a connection, which is reset (`DISCARD ALL`)
   before going back, so `SET`, temp tables and read-only changes last for that
   run only, and a transaction left open is rolled back.
+
+### When the profile or password changes
+
+Each run picks up the connection as the profile defines it now.  The server
+connection is brought up to date at the start of an interactive run (`C-c C-c`,
+`g`, `devtools-sql-refresh-schema`), never by background work such as loading
+completion names:
+
+- **Only the password changed** (authinfo): it is checked and used for new
+  connections; the pool and sessions stay, with their state.
+- **Other settings changed** (host, port, user, database, read-only): this needs
+  a new connection, which closes the connection's sessions.  If none holds
+  state, that happens without asking.  Otherwise you are asked first, with what
+  would be lost (open or failed transaction, temp tables, `SET` changes,
+  prepared statements, cursors, `LISTEN` channels, advisory locks, a running
+  query):
+
+  ```
+  Settings of local/app changed (read-only: off → on).  Reopening loses:
+    app.sql: open transaction, temp table notes
+  Reopen now? (y or n)
+  ```
+
+  Answering no keeps the current connection, with its old settings, and asks
+  again on the next run.
 
 Set `devtools-sql-query-files-use-session` to nil to run on the pool by
 default; `C-u` then picks the session.  The result buffer's header line says

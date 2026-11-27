@@ -147,7 +147,7 @@ Return the buffer."
       (erase-buffer)
       (org-mode)
       (devtools-sql-result--insert-query)
-      (insert (propertize "Running..." 'face 'shadow)))
+      (insert (propertize "Running..." 'font-lock-face 'shadow)))
     (setq header-line-format '(:eval (devtools-sql-result--header-line))
           truncate-lines t)
     (set-buffer-modified-p nil)
@@ -215,7 +215,7 @@ The last statement's result is shown.  ELAPSED is in seconds."
     (devtools-sql-result--render
      buffer 'done elapsed
      (lambda ()
-       (cond ((null last) (insert (propertize "No statements" 'face 'shadow)) nil)
+       (cond ((null last) (insert (propertize "No statements" 'font-lock-face 'shadow)) nil)
              ((plist-get last :columns) (devtools-sql-result--insert-table last))
              (t (insert (plist-get last :command)) nil))))))
 
@@ -238,7 +238,7 @@ ELAPSED is in seconds."
    (lambda ()
      (let ((data (plist-get error :data))
            (sql (plist-get devtools-sql-result--info :sql)))
-       (insert (propertize (concat "ERROR:  " (plist-get error :message)) 'face 'error))
+       (insert (propertize (concat "ERROR:  " (plist-get error :message)) 'font-lock-face 'error))
        (when-let* ((position (plist-get data :position))
                    ((stringp sql)))
          (insert "\n" (devtools-sql-result--error-context sql position)))

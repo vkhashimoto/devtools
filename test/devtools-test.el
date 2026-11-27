@@ -1275,4 +1275,22 @@
           (should (equal (buffer-name) "app.sql"))
           (should (looking-at "select id,")))))))
 
+(ert-deftest devtools-test-result-colors-survive-font-lock ()
+  ;; Org's font-lock removes `face' text properties; `font-lock-face' stays.
+  (let ((devtools-profiles '((local)))
+        (buffer (save-window-excursion
+                  (devtools-sql-result-start '(:name "app") 'local #'ignore "select nope"))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "Running")
+          (should (eq (get-text-property (1- (point)) 'font-lock-face) 'shadow))
+          (devtools-sql-result-show-error buffer '(:code -32001 :message "boom") 0.1)
+          (font-lock-ensure)
+          (goto-char (point-min))
+          (search-forward "ERROR")
+          (should (eq (get-text-property (1- (point)) 'font-lock-face) 'error)))
+      (kill-buffer buffer))))
+
 ;;; devtools-test.el ends here

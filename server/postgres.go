@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -22,6 +24,7 @@ type openParams struct {
 	Password string `json:"password"`
 	Database string `json:"database"`
 	ReadOnly bool   `json:"readOnly"`
+	PoolSize int    `json:"poolSize"`
 }
 
 type pgConnection struct {
@@ -66,6 +69,10 @@ func (s *server) openConnection(ctx context.Context, raw json.RawMessage) (any, 
 	if params.ReadOnly {
 		cc.RuntimeParams["default_transaction_read_only"] = "on"
 	}
+	if params.PoolSize > 0 {
+		config.MaxConns = int32(params.PoolSize)
+	}
+	config.AfterRelease = resetConnection
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -86,6 +93,25 @@ func (s *server) openConnection(ctx context.Context, raw json.RawMessage) (any, 
 		old.close()
 	}
 	return nil, nil
+}
+
+// resetConnection clears what a run left on a connection (SET, temp tables,
+// prepared statements...) before it goes back to the pool, restoring its
+// startup settings, read-only included.  A connection that cannot be
+// reset is closed instead.
+func resetConnection(conn *pgx.Conn) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := conn.PgConn().Exec(ctx, "DISCARD ALL").ReadAll(); err != nil {
+		log.Printf("resetting a connection: %v", err)
+		return false
+	}
+	// The server dropped its prepared statements; drop pgx's cached ones.
+	if err := conn.DeallocateAll(ctx); err != nil {
+		log.Printf("resetting a connection: %v", err)
+		return false
+	}
+	return true
 }
 
 func (s *server) closeConnection(ctx context.Context, raw json.RawMessage) (any, error) {

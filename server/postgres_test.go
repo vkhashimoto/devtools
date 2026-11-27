@@ -143,3 +143,63 @@ func TestPostgresReopenReplacesPool(t *testing.T) {
 		t.Fatalf("got %+v", err)
 	}
 }
+
+// With one connection in the pool, every run reuses it; what a run sets
+// must not reach the next one.
+func TestPostgresPoolResetsConnections(t *testing.T) {
+	c := startServer(t)
+	openDemo(t, c, map[string]any{"readOnly": true, "poolSize": 1})
+	backend := func() string {
+		t.Helper()
+		result, err := executeDemo(t, c, "select pg_backend_pid()", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return *result.Results[0].Rows[0][0]
+	}
+	pid := backend()
+
+	// Turning read-only off lasts for that run only.
+	if _, err := executeDemo(t, c, "set default_transaction_read_only = off", 0); err != nil {
+		t.Fatal(err)
+	}
+	_, err := executeDemo(t, c, "delete from orders where false", 0)
+	if err == nil || err.Data.(map[string]any)["sqlstate"] != "25006" {
+		t.Fatalf("read-only leaked past its run: %+v", err)
+	}
+
+	// Temp tables and settings are gone in the next run.
+	if _, err := executeDemo(t, c, "begin read write; create temp table probe (x int); commit; set search_path = nowhere", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executeDemo(t, c, "select * from probe", 0); err == nil || err.Data.(map[string]any)["sqlstate"] != "42P01" {
+		t.Fatalf("temp table leaked: %+v", err)
+	}
+	result, err := executeDemo(t, c, "show search_path", 0)
+	if err != nil || *result.Results[0].Rows[0][0] != `"$user", public` {
+		t.Fatalf("search_path leaked: %+v %+v", result, err)
+	}
+
+	// State within one run still works.
+	result, err = executeDemo(t, c, "begin read write; create temp table t (x int); insert into t values (7); select x from t; commit", 0)
+	if err != nil || *result.Results[3].Rows[0][0] != "7" {
+		t.Fatalf("state within a run: %+v %+v", result, err)
+	}
+
+	if got := backend(); got != pid {
+		t.Fatalf("connection was replaced (pid %s, then %s), not reset", pid, got)
+	}
+}
+
+// A run that leaves a transaction open loses it; the next run starts clean.
+func TestPostgresOpenTransactionIsDropped(t *testing.T) {
+	c := startServer(t)
+	openDemo(t, c, map[string]any{"poolSize": 1})
+	if _, err := executeDemo(t, c, "begin; update orders set status = 'lost' where id = 1", 0); err != nil {
+		t.Fatal(err)
+	}
+	result, err := executeDemo(t, c, "select status from orders where id = 1", 0)
+	if err != nil || *result.Results[0].Rows[0][0] != "open" {
+		t.Fatalf("uncommitted update visible: %+v %+v", result, err)
+	}
+}

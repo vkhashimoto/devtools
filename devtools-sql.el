@@ -39,8 +39,9 @@ envrc/nix shell is respected."
 
 (defcustom devtools-sql-read-only-in-production t
   "When non-nil, production connections use read-only transactions.
-A connection's :read-only key overrides this.  To write on purpose in
-a read-only session, run: SET default_transaction_read_only = off;"
+A connection's :read-only key overrides this.  To write on purpose,
+wrap the statements in one run: BEGIN READ WRITE; ...; COMMIT;
+In the psql REPL, SET default_transaction_read_only = off; also works."
   :type 'boolean
   :group 'devtools)
 

@@ -69,10 +69,15 @@ In a query file (`devtools-sql-query-mode`):
 | `M-x devtools-sql-refresh-schema` | Reload the names offered for completion |
 
 Queries run on a connection pool kept by devtools-server; with several
-statements, the result of the last one is shown.  Session state (`SET`, temp
-tables, open transactions) does not carry over between runs yet; use the REPL
-for that.  NULL shows as `[NULL]`, distinct from an empty string, and errors
-show the failing line with a caret, plus Postgres' detail and hint.
+statements, the result of the last one is shown.  Each run is stateless: the
+connection is reset (`DISCARD ALL`) before going back to the pool, so `SET`,
+temp tables and read-only changes last for that run only, and a transaction
+left open is rolled back.  Within one run they work as usual; to write on a
+read-only connection, use `BEGIN READ WRITE; ...; COMMIT;` in one run.  For
+state across runs, use the REPL.
+
+NULL shows as `[NULL]`, distinct from an empty string, and errors show the
+failing line with a caret, plus Postgres' detail and hint.
 
 ## devtools-server
 
@@ -82,7 +87,7 @@ like LSP (`Content-Length` headers).  Methods so far:
 | Method             | Purpose                                                    |
 |--------------------|------------------------------------------------------------|
 | `initialize`       | Server name, version and drivers                           |
-| `connection/open`  | Open (or replace) a pool: driver, host, port, user, password, database, readOnly |
+| `connection/open`  | Open (or replace) a pool: driver, host, port, user, password, database, readOnly, poolSize |
 | `connection/close` | Close a pool                                               |
 | `query/execute`    | Run SQL; every statement's columns, rows (text, NULL as null) or command tag |
 

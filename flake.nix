@@ -55,9 +55,15 @@
         default = mkDevtools pkgs.emacsPackages;
       });
 
-      # psql and the demo database server.
+      # psql and the demo database server, and Go for server/ (its
+      # dependencies come from go.mod, so it also builds without Nix).
       devShells = forAllSystems (pkgs: {
-        default = pkgs.mkShell { packages = [ pkgs.postgresql ]; };
+        default = pkgs.mkShell {
+          packages = [
+            pkgs.postgresql
+            pkgs.go
+          ];
+        };
       });
 
       # Byte-compile and run every test, Postgres ones included.

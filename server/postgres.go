@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -28,13 +29,41 @@ type openParams struct {
 }
 
 type pgConnection struct {
-	pool *pgxpool.Pool
+	// settings are the parameters the pool was opened with, password
+	// excluded: a change to them needs a new pool.
+	settings openParams
+	pool     *pgxpool.Pool
+
+	mu       sync.Mutex
+	password string
 }
 
 func (c *pgConnection) close() { c.pool.Close() }
 
-// openConnection creates a pool for params.ID, replacing any open one.
-// It connects once so bad credentials are reported here.
+func (c *pgConnection) currentPassword() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.password
+}
+
+func (c *pgConnection) setPassword(password string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.password = password
+}
+
+// connConfig returns the settings for a new connection outside the pool.
+func (c *pgConnection) connConfig() *pgx.ConnConfig {
+	config := c.pool.Config().ConnConfig
+	config.Password = c.currentPassword()
+	return config
+}
+
+// openConnection creates a pool for params.ID, replacing any open one
+// and closing its sessions.  It connects once so bad credentials are
+// reported here.  When only the password differs from the open pool's,
+// the pool and its sessions stay; the new password, once checked, is
+// used for the connections opened from then on.
 func (s *server) openConnection(ctx context.Context, raw json.RawMessage) (any, error) {
 	var params openParams
 	if err := decodeParams(raw, &params); err != nil {
@@ -45,6 +74,25 @@ func (s *server) openConnection(ctx context.Context, raw json.RawMessage) (any, 
 	}
 	if params.Driver != "postgres" {
 		return nil, &rpcError{Code: codeInvalidParams, Message: "unsupported driver " + strconv.Quote(params.Driver)}
+	}
+	settings := params
+	settings.Password = ""
+
+	s.mu.Lock()
+	existing := s.conns[params.ID]
+	s.mu.Unlock()
+	if existing != nil && existing.settings == settings {
+		config := existing.connConfig()
+		config.Password = params.Password
+		connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		check, err := pgx.ConnectConfig(connectCtx, config)
+		if err != nil {
+			return nil, databaseError(err)
+		}
+		check.Close(context.Background())
+		existing.setPassword(params.Password)
+		return map[string]any{"kept": true}, nil
 	}
 
 	config, err := pgxpool.ParseConfig("")
@@ -64,7 +112,6 @@ func (s *server) openConnection(ctx context.Context, raw json.RawMessage) (any, 
 	if params.Database != "" {
 		cc.Database = params.Database
 	}
-	cc.Password = params.Password
 	cc.RuntimeParams["application_name"] = "devtools"
 	if params.ReadOnly {
 		cc.RuntimeParams["default_transaction_read_only"] = "on"
@@ -73,6 +120,11 @@ func (s *server) openConnection(ctx context.Context, raw json.RawMessage) (any, 
 		config.MaxConns = int32(params.PoolSize)
 	}
 	config.AfterRelease = resetConnection
+	conn := &pgConnection{settings: settings, password: params.Password}
+	config.BeforeConnect = func(ctx context.Context, cc *pgx.ConnConfig) error {
+		cc.Password = conn.currentPassword()
+		return nil
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -84,17 +136,18 @@ func (s *server) openConnection(ctx context.Context, raw json.RawMessage) (any, 
 		pool.Close()
 		return nil, databaseError(err)
 	}
+	conn.pool = pool
 
 	s.mu.Lock()
 	old := s.conns[params.ID]
-	s.conns[params.ID] = &pgConnection{pool: pool}
+	s.conns[params.ID] = conn
 	// Sessions keep the settings they were opened with; close them.
 	s.dropSessions(params.ID)
 	s.mu.Unlock()
 	if old != nil {
 		old.close()
 	}
-	return nil, nil
+	return map[string]any{"kept": false}, nil
 }
 
 // resetConnection clears what a run left on a connection (SET, temp tables,

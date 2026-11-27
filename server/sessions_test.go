@@ -233,3 +233,47 @@ func TestSessionDoesNotBlockThePool(t *testing.T) {
 	}
 	c.receive()
 }
+
+// When only the password changes, the pool and its sessions stay; the
+// new password is checked, then used for new connections.
+func TestPasswordChangeKeepsPoolAndSessions(t *testing.T) {
+	c := startServer(t)
+	openDemo(t, c, nil)
+	s := openSession(t, c)
+	if _, err := executeSession(t, c, s, "create temp table kept (x int)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executeDemo(t, c, "alter role dev password 'rotated'", 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		params := demoParams(t)
+		if r := c.call("connection/open", params); r.Error != nil {
+			// The pool may hold the rotated password; reopen with it.
+			params["password"] = "rotated"
+			c.call("connection/open", params)
+		}
+		executeDemo(t, c, "alter role dev password 'devpass'", 0)
+	})
+
+	// A wrong password is refused and changes nothing.
+	r := c.call("connection/open", map[string]any{"id": "local/app", "driver": "postgres", "host": "localhost",
+		"port": demoParams(t)["port"], "user": "dev", "password": "wrong", "database": "app"})
+	if r.Error == nil || r.Error.Code != codeDatabaseError {
+		t.Fatalf("wrong password accepted: %+v", r.Error)
+	}
+
+	r = c.call("connection/open", map[string]any{"id": "local/app", "driver": "postgres", "host": "localhost",
+		"port": demoParams(t)["port"], "user": "dev", "password": "rotated", "database": "app"})
+	if r.Error != nil || string(r.Result) != `{"kept":true}` {
+		t.Fatalf("password update: %s %+v", r.Result, r.Error)
+	}
+	if _, err := executeSession(t, c, s, "select * from kept"); err != nil {
+		t.Fatalf("session lost its state: %+v", err)
+	}
+	// New connections use the new password: a new session and a pooled run.
+	openSession(t, c)
+	if _, err := executeDemo(t, c, "select 1", 0); err != nil {
+		t.Fatal(err)
+	}
+}

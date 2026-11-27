@@ -36,7 +36,7 @@ func (s *server) openSession(ctx context.Context, raw json.RawMessage) (any, err
 	}
 	connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	pgConn, err := pgx.ConnectConfig(connectCtx, conn.pool.Config().ConnConfig)
+	pgConn, err := pgx.ConnectConfig(connectCtx, conn.connConfig())
 	if err != nil {
 		return nil, databaseError(err)
 	}

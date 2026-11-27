@@ -142,7 +142,7 @@ like LSP (`Content-Length` headers).  Methods so far:
 | Method             | Purpose                                                    |
 |--------------------|------------------------------------------------------------|
 | `initialize`       | Server name, version and drivers                           |
-| `connection/open`  | Open (or replace) a pool: driver, host, port, user, password, database, readOnly, poolSize; closes its sessions |
+| `connection/open`  | Open (or replace) a pool: driver, host, port, user, password, database, readOnly, poolSize; replacing closes its sessions, but when only the password changed, it is checked and used for new connections, and the pool and sessions stay |
 | `connection/close` | Close a pool and its sessions                              |
 | `session/open`     | Open a session on a connection: a connection of its own, with the pool's settings |
 | `session/close`    | Close a session                                            |

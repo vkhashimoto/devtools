@@ -169,6 +169,7 @@ the result's (SHOWN-ROWS . TOTAL-ROWS), or nil when it is no table."
     (with-current-buffer buffer
       (let ((inhibit-read-only t)
             rows)
+        (devtools-sql-result--clear-overlays)
         (erase-buffer)
         (devtools-sql-result--insert-query)
         (setq rows (funcall insert))
@@ -250,7 +251,8 @@ ELAPSED is in seconds."
 (defun devtools-sql-result--clear-overlays ()
   "Remove the overlays added by the result buffer."
   (dolist (property '(devtools-sql-result-marked devtools-sql-result-null
-                                                 devtools-sql-result-indicator))
+                                                 devtools-sql-result-indicator
+                                                 devtools-sql-result-query-overlay))
     (remove-overlays (point-min) (point-max) property t)))
 
 (defun devtools-sql-result--header-line ()
@@ -355,10 +357,12 @@ RET on it goes to the query in its file."
                   (if (or long (cdr lines)) (propertize "…" 'font-lock-face 'shadow) "")
                   (if label (concat "   " (propertize label 'font-lock-face 'shadow)) "")
                   "\n")))
-      (add-text-properties start (point)
-                           (list 'devtools-sql-result-query t
-                                 'keymap devtools-sql-result-query-map
-                                 'help-echo "RET: go to the query in its file"))
+      (put-text-property start (point) 'devtools-sql-result-query t)
+      ;; An overlay: Org's font-lock removes `keymap' text properties.
+      (let ((overlay (make-overlay start (point))))
+        (overlay-put overlay 'devtools-sql-result-query-overlay t)
+        (overlay-put overlay 'keymap devtools-sql-result-query-map)
+        (overlay-put overlay 'help-echo "RET: go to the query in its file"))
       (insert "\n"))))
 
 (defun devtools-sql-result--goto-first-row ()
@@ -378,6 +382,7 @@ RET on it goes to the query in its file."
   (setq devtools-sql-result--query-expanded (not devtools-sql-result--query-expanded))
   (let ((inhibit-read-only t))
     (save-excursion
+      (remove-overlays (point-min) (point-max) 'devtools-sql-result-query-overlay t)
       (when (get-text-property (point-min) 'devtools-sql-result-query)
         ;; The query, then the blank line after it.
         (delete-region (point-min)

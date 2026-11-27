@@ -1210,7 +1210,14 @@
 
 (ert-deftest devtools-test-result-query-keys ()
   (devtools-test--with-query-result "select 1" nil
+    ;; Org's font-lock, which runs once the buffer shows, keeps RET working.
+    (font-lock-ensure)
     (goto-char (point-min))
+    (should (eq (key-binding (kbd "RET")) #'devtools-sql-result-visit-query))
+    (devtools-sql-result-toggle-query)
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (forward-line 1)
     (should (eq (key-binding (kbd "RET")) #'devtools-sql-result-visit-query))
     (devtools-sql-result--goto-first-row)
     (should-not (eq (key-binding (kbd "RET")) #'devtools-sql-result-visit-query))
@@ -1261,6 +1268,7 @@
       (should (eq (devtools-test--wait-for-result result) 'done))
       (with-current-buffer result
         (should (string-match-p "\\`▸ select id,…   app.sql:5\n" (devtools-test--query-text)))
+        (font-lock-ensure)
         (save-window-excursion
           (goto-char (point-min))
           (call-interactively (key-binding (kbd "RET")))

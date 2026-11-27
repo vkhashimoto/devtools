@@ -334,6 +334,21 @@ prefix argument ALL, look in every environment."
       (prog1 (find-file file)
         (devtools-sql--link-query-buffer conn profile name)))))
 
+;;;###autoload
+(defun devtools-sql-query-named ()
+  "Open a named query file of a datasource, new or existing.
+Like `devtools-sql-query' with a prefix argument."
+  (interactive)
+  (let ((current-prefix-arg '(4)))
+    (call-interactively #'devtools-sql-query)))
+
+;;;###autoload
+(defun devtools-sql-find-file-everywhere ()
+  "Open a query file of any environment, found by name or description.
+Like `devtools-sql-find-file' with a prefix argument."
+  (interactive)
+  (devtools-sql-find-file t))
+
 ;;; Running queries into a result buffer
 
 (defvar devtools-sql-after-execute-functions nil

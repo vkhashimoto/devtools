@@ -4,7 +4,8 @@
 
 ;; One entry point for every devtools command.  Bind `devtools-menu' to
 ;; a key of your choice; add or rebind entries with `transient-append-suffix'
-;; and friends.
+;; and friends.  A prefix argument typed before the menu key does not reach
+;; the commands; type it in the menu (C-u before the entry's key) instead.
 
 ;;; Code:
 
@@ -25,7 +26,9 @@
    ["Postgres"
     ("p" "REPL" devtools-sql-connect)
     ("q" "Query file" devtools-sql-query)
-    ("f" "Find query file" devtools-sql-find-file)]])
+    ("n" "Named query file" devtools-sql-query-named)
+    ("f" "Find query file" devtools-sql-find-file)
+    ("F" "Find in all environments" devtools-sql-find-file-everywhere)]])
 
 (provide 'devtools-menu)
 ;;; devtools-menu.el ends here

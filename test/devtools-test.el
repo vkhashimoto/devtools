@@ -914,4 +914,34 @@
                 (kill-buffer))))
         (delete-directory devtools-sql-query-directory t)))))
 
+(ert-deftest devtools-test-menu-commands-without-prefix ()
+  (devtools-test--with-profiles
+    (let ((devtools-sql-query-directory (make-temp-file "devtools-sql" t)))
+      (unwind-protect
+          (progn
+            ;; The named file entry asks for a name, as C-u C-c d q would.
+            (cl-letf (((symbol-function 'devtools-sql--read-connection)
+                       (lambda () (devtools-test--conn 'local "app")))
+                      ((symbol-function 'completing-read) (lambda (&rest _) "report"))
+                      ((symbol-function 'read-string) (lambda (&rest _) "Monthly revenue")))
+              (with-current-buffer (save-window-excursion (devtools-sql-query-named))
+                (should (string-suffix-p "/local/app/report.sql" buffer-file-name))
+                (should (equal (buffer-string) "-- Monthly revenue\n\n"))
+                (kill-buffer)))
+            ;; Finding everywhere lists other environments too.
+            (let (collection)
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (_prompt candidates &rest _)
+                           (setq collection (mapcar (lambda (c) (substring-no-properties (car c)))
+                                                    candidates))
+                           (car collection))))
+                (kill-buffer (save-window-excursion (devtools-sql-find-file-everywhere))))
+              (should (seq-find (lambda (c) (string-prefix-p "prod/writer" c)) collection))))
+        (delete-directory devtools-sql-query-directory t)))))
+
+(ert-deftest devtools-test-menu-entries ()
+  (dolist (command '(devtools-sql-query devtools-sql-query-named
+                     devtools-sql-find-file devtools-sql-find-file-everywhere))
+    (should (transient-get-suffix 'devtools-menu command))))
+
 ;;; devtools-test.el ends here

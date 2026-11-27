@@ -58,8 +58,12 @@ The rows show up as an aligned table in `*SQL Result: local/app*`.
 | `C-c d e` | Switch environment (menu stays open)              |
 | `C-c d p` | psql REPL for a connection                        |
 | `C-c d q` | Default query file of a datasource                |
-| `C-u C-c d q` | Another query file of a datasource, by name (new or existing) |
-| `C-c d f` | Find a query file of the environment by name or description (`C-u`: every environment) |
+| `C-c d n` | Named query file of a datasource (new or existing) |
+| `C-c d f` | Find a query file of the environment by name or description |
+| `C-c d F` | Find a query file of any environment |
+
+A prefix argument typed before `C-c d` does not reach the command you pick; type
+it inside the menu instead (`C-c d C-u q` is the same as `C-c d n`).
 
 Each datasource (an entry under `:postgres`) has a default query file,
 `<environment>/<datasource>.sql`, and as many named ones as you like,
@@ -68,7 +72,7 @@ Each datasource (an entry under `:postgres`) has a default query file,
 result buffer (`*SQL Result: prod/app*`, `*SQL Result: prod/app/cleanup*`).
 
 A file's **description** is its first line when that is a comment.  A new named
-file asks for one and writes it there (`-- Monthly revenue by customer`); edit
+file (`C-c d n`) asks for one and writes it there (`-- Monthly revenue by customer`); edit
 that line to change it.  `C-c d f` lists the files with their descriptions,
 so any word of either finds a file.  Every datasource's default file is
 listed, even before it exists:

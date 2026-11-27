@@ -88,6 +88,8 @@ func (s *server) openConnection(ctx context.Context, raw json.RawMessage) (any, 
 	s.mu.Lock()
 	old := s.conns[params.ID]
 	s.conns[params.ID] = &pgConnection{pool: pool}
+	// Sessions keep the settings they were opened with; close them.
+	s.dropSessions(params.ID)
 	s.mu.Unlock()
 	if old != nil {
 		old.close()
@@ -124,6 +126,7 @@ func (s *server) closeConnection(ctx context.Context, raw json.RawMessage) (any,
 	s.mu.Lock()
 	conn := s.conns[params.ID]
 	delete(s.conns, params.ID)
+	s.dropSessions(params.ID)
 	s.mu.Unlock()
 	if conn != nil {
 		conn.close()
@@ -158,13 +161,17 @@ type resultSet struct {
 type executeResult struct {
 	ElapsedMs int64       `json:"elapsedMs"`
 	Results   []resultSet `json:"results"`
+	// TxStatus is set for runs on a session: idle, transaction or failed.
+	TxStatus string `json:"txStatus,omitempty"`
 }
 
 // execute runs every statement of params.SQL and returns all results,
-// each limited to maxRows rows (TotalRows counts all of them).
+// each limited to maxRows rows (TotalRows counts all of them).  It runs
+// on params.Session when given, else on a connection from the pool.
 func (s *server) execute(ctx context.Context, raw json.RawMessage) (any, error) {
 	var params struct {
 		Connection string `json:"connection"`
+		Session    string `json:"session"`
 		SQL        string `json:"sql"`
 		MaxRows    int    `json:"maxRows"`
 	}
@@ -173,6 +180,9 @@ func (s *server) execute(ctx context.Context, raw json.RawMessage) (any, error) 
 	}
 	if params.MaxRows <= 0 {
 		params.MaxRows = defaultMaxRows
+	}
+	if params.Session != "" {
+		return s.executeOnSession(ctx, params.Session, params.SQL, params.MaxRows)
 	}
 	conn, err := s.connection(params.Connection)
 	if err != nil {
@@ -183,11 +193,20 @@ func (s *server) execute(ctx context.Context, raw json.RawMessage) (any, error) 
 		return nil, databaseError(err)
 	}
 	defer pooled.Release()
-	types := pooled.Conn().TypeMap()
+	result, err := runQuery(ctx, pooled.Conn(), params.SQL, params.MaxRows)
+	if err != nil {
+		return nil, databaseError(err)
+	}
+	return result, nil
+}
 
+// runQuery runs sql on conn with the simple protocol, so it may hold
+// several statements, and collects every statement's result.
+func runQuery(ctx context.Context, conn *pgx.Conn, sql string, maxRows int) (executeResult, error) {
+	types := conn.TypeMap()
 	started := time.Now()
 	results := []resultSet{}
-	reader := pooled.Conn().PgConn().Exec(ctx, params.SQL)
+	reader := conn.PgConn().Exec(ctx, sql)
 	for reader.NextResult() {
 		rows := reader.ResultReader()
 		var set resultSet
@@ -200,7 +219,7 @@ func (s *server) execute(ctx context.Context, raw json.RawMessage) (any, error) 
 		}
 		for rows.NextRow() {
 			set.TotalRows++
-			if len(set.Rows) >= params.MaxRows {
+			if len(set.Rows) >= maxRows {
 				continue
 			}
 			values := rows.Values()
@@ -216,7 +235,7 @@ func (s *server) execute(ctx context.Context, raw json.RawMessage) (any, error) 
 		tag, err := rows.Close()
 		if err != nil {
 			reader.Close()
-			return nil, databaseError(err)
+			return executeResult{}, err
 		}
 		set.Command = tag.String()
 		if set.Columns != nil && set.Rows == nil {
@@ -225,14 +244,14 @@ func (s *server) execute(ctx context.Context, raw json.RawMessage) (any, error) 
 		results = append(results, set)
 	}
 	if err := reader.Close(); err != nil {
-		return nil, databaseError(err)
+		return executeResult{}, err
 	}
 	return executeResult{ElapsedMs: time.Since(started).Milliseconds(), Results: results}, nil
 }
 
 // databaseError turns a driver error into a reply carrying Postgres'
 // details when there are some.
-func databaseError(err error) error {
+func databaseError(err error) *rpcError {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		data := map[string]any{

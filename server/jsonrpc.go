@@ -24,6 +24,9 @@ const (
 
 	codeDatabaseError      = -32001
 	codeConnectionNotFound = -32002
+	codeSessionNotFound    = -32003
+	codeSessionBusy        = -32004
+	codeSessionLost        = -32005
 )
 
 type request struct {

@@ -17,22 +17,27 @@ type server struct {
 	out     *messageWriter
 	methods map[string]handlerFunc
 
-	mu    sync.Mutex
-	conns map[string]*pgConnection
+	mu          sync.Mutex
+	conns       map[string]*pgConnection
+	sessions    map[string]*session
+	nextSession int
 
 	inflight sync.WaitGroup
 }
 
 func newServer(out io.Writer) *server {
 	s := &server{
-		out:   &messageWriter{w: out},
-		conns: map[string]*pgConnection{},
+		out:      &messageWriter{w: out},
+		conns:    map[string]*pgConnection{},
+		sessions: map[string]*session{},
 	}
 	s.methods = map[string]handlerFunc{
 		"initialize":       s.initialize,
 		"connection/open":  s.openConnection,
 		"connection/close": s.closeConnection,
 		"query/execute":    s.execute,
+		"session/open":     s.openSession,
+		"session/close":    s.closeSession,
 	}
 	return s
 }
@@ -125,10 +130,14 @@ func (s *server) initialize(ctx context.Context, params json.RawMessage) (any, e
 	}, nil
 }
 
-// closeAll closes every open connection.
+// closeAll closes every session and connection.
 func (s *server) closeAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for id, sess := range s.sessions {
+		sess.close()
+		delete(s.sessions, id)
+	}
 	for id, conn := range s.conns {
 		conn.close()
 		delete(s.conns, id)

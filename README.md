@@ -87,11 +87,16 @@ like LSP (`Content-Length` headers).  Methods so far:
 | Method             | Purpose                                                    |
 |--------------------|------------------------------------------------------------|
 | `initialize`       | Server name, version and drivers                           |
-| `connection/open`  | Open (or replace) a pool: driver, host, port, user, password, database, readOnly, poolSize |
-| `connection/close` | Close a pool                                               |
-| `query/execute`    | Run SQL; every statement's columns, rows (text, NULL as null) or command tag |
+| `connection/open`  | Open (or replace) a pool: driver, host, port, user, password, database, readOnly, poolSize; closes its sessions |
+| `connection/close` | Close a pool and its sessions                              |
+| `session/open`     | Open a session on a connection: a connection of its own, with the pool's settings |
+| `session/close`    | Close a session                                            |
+| `query/execute`    | Run SQL on the pool, or on a session; every statement's columns, rows (text, NULL as null) or command tag, plus `txStatus` (idle, transaction, failed) for sessions |
 
-Errors carry Postgres' SQLSTATE, detail, hint and position in `data`.
+Errors carry Postgres' SQLSTATE, detail, hint and position in `data` (and
+`txStatus` for sessions).  A session runs one query at a time (a second one
+gets a "busy" error); one whose connection dies is reported lost, never
+silently replaced.
 
 | Command                        | What it does                                   |
 |--------------------------------|------------------------------------------------|

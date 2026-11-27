@@ -146,6 +146,7 @@ like LSP (`Content-Length` headers).  Methods so far:
 | `connection/close` | Close a pool and its sessions                              |
 | `session/open`     | Open a session on a connection: a connection of its own, with the pool's settings |
 | `session/close`    | Close a session                                            |
+| `session/state`    | What a session holds: transaction state, SET changes, temp tables, prepared statements, cursors, LISTEN channels, advisory locks |
 | `query/execute`    | Run SQL on the pool, or on a session; every statement's columns, rows (text, NULL as null) or command tag, plus `txStatus` (idle, transaction, failed) for sessions |
 | `schema/describe`  | Tables and views of a connection, with their columns and types, for completion |
 

@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -275,5 +276,72 @@ func TestPasswordChangeKeepsPoolAndSessions(t *testing.T) {
 	openSession(t, c)
 	if _, err := executeDemo(t, c, "select 1", 0); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func sessionStateOf(t *testing.T, c *client, session string) sessionState {
+	t.Helper()
+	r := c.call("session/state", map[string]any{"session": session})
+	if r.Error != nil {
+		t.Fatalf("session/state: %+v", r.Error)
+	}
+	var state sessionState
+	if err := json.Unmarshal(r.Result, &state); err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+func TestSessionState(t *testing.T) {
+	c := startServer(t)
+	openDemo(t, c, map[string]any{"readOnly": true})
+	s := openSession(t, c)
+
+	// A new session holds nothing; startup settings (read-only,
+	// application_name) do not count.
+	empty := sessionState{Transaction: "idle", Settings: []string{}, TempTables: []string{},
+		Prepared: []string{}, Cursors: []string{}, Listening: []string{}}
+	if got := sessionStateOf(t, c, s); !reflect.DeepEqual(got, empty) {
+		t.Fatalf("new session: %+v", got)
+	}
+
+	if _, err := executeSession(t, c, s, `begin read write;
+create temp table notes (x int);
+commit;
+set statement_timeout = '5s';
+set search_path = public;
+prepare one as select 1;
+listen jobs;
+select pg_advisory_lock(42)`); err != nil {
+		t.Fatal(err)
+	}
+	// In its own run: a BEGIN would hold back the LISTEN above until a commit.
+	if _, err := executeSession(t, c, s, "begin; declare c cursor for select 1"); err != nil {
+		t.Fatal(err)
+	}
+	want := sessionState{Transaction: "transaction",
+		Settings:   []string{"search_path", "statement_timeout"},
+		TempTables: []string{"notes"}, Prepared: []string{"one"}, Cursors: []string{"c"},
+		Listening: []string{"jobs"}, AdvisoryLocks: 1}
+	if got := sessionStateOf(t, c, s); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+	// Checking the state leaves no prepared statement behind.
+	if got := sessionStateOf(t, c, s); !reflect.DeepEqual(got.Prepared, []string{"one"}) {
+		t.Fatalf("prepared after two checks: %v", got.Prepared)
+	}
+
+	// In a failed transaction only the transaction is known.
+	executeSession(t, c, s, "select nope")
+	if got := sessionStateOf(t, c, s); got.Transaction != "failed" {
+		t.Fatalf("failed transaction: %+v", got)
+	}
+}
+
+func TestSessionStateUnknownSession(t *testing.T) {
+	c := startServer(t)
+	r := c.call("session/state", map[string]any{"session": "missing"})
+	if r.Error == nil || r.Error.Code != codeSessionNotFound {
+		t.Fatalf("got %+v", r.Error)
 	}
 }

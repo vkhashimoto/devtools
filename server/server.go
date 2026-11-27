@@ -38,6 +38,7 @@ func newServer(out io.Writer) *server {
 		"query/execute":    s.execute,
 		"session/open":     s.openSession,
 		"session/close":    s.closeSession,
+		"session/state":    s.describeSession,
 		"schema/describe":  s.describeSchema,
 	}
 	return s

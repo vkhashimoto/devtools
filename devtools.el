@@ -13,6 +13,7 @@
 
 (require 'devtools-profiles)
 (require 'devtools-sql)
+(require 'devtools-sql-schema)
 (require 'devtools-menu)
 
 (defcustom devtools-display-rules

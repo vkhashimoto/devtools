@@ -305,4 +305,118 @@
             (should (eq (devtools-sql--start conn 'local) repl)))
         (let ((kill-buffer-query-functions nil)) (kill-buffer repl))))))
 
+;;; Completion
+
+(defconst devtools-test--schema-csv
+  (concat "table_schema,table_name,table_type,column_name,data_type\n"
+          "public,orders,BASE TABLE,id,integer\n"
+          "public,orders,BASE TABLE,customer,text\n"
+          "public,customers,BASE TABLE,id,integer\n"
+          "public,customers,BASE TABLE,email,text\n"
+          "sales,leads,VIEW,score,numeric\n"))
+
+(ert-deftest devtools-test-schema-parse ()
+  (should (equal (devtools-sql-schema--parse devtools-test--schema-csv)
+                 '((:schema "public" :name "orders" :type "BASE TABLE"
+                    :columns (("id" . "integer") ("customer" . "text")))
+                   (:schema "public" :name "customers" :type "BASE TABLE"
+                    :columns (("id" . "integer") ("email" . "text")))
+                   (:schema "sales" :name "leads" :type "VIEW"
+                    :columns (("score" . "numeric")))))))
+
+(ert-deftest devtools-test-schema-statement-tables ()
+  (with-temp-buffer
+    (insert "select o.id\nfrom orders o\njoin public.customers as c on c.id = o.id\n"
+            "left join items where x = 1")
+    (should (equal (devtools-sql-schema--statement-tables (point-min) (point-max))
+                   '(("orders" . "o") ("public.customers" . "c") ("items"))))))
+
+(defun devtools-test--complete (text)
+  "Return the completions at `|' in TEXT, with fake schema data."
+  (let ((devtools-sql-schema--cache (make-hash-table :test #'equal)))
+    (puthash '(local . "app") (devtools-sql-schema--parse devtools-test--schema-csv)
+             devtools-sql-schema--cache)
+    (with-temp-buffer
+      (sql-mode)
+      (setq devtools-sql-connection '(:name "app") devtools-sql-profile 'local)
+      (insert text)
+      (goto-char (point-min))
+      (search-forward "|")
+      (delete-char -1)
+      (when-let* ((capf (devtools-sql-schema-completion-at-point)))
+        (pcase-let ((`(,start ,end ,candidates . ,props) capf))
+          (list (buffer-substring start end)
+                (mapcar (lambda (c) (concat c (funcall (plist-get props :annotation-function) c)))
+                        candidates)))))))
+
+(ert-deftest devtools-test-complete-columns-after-alias ()
+  (should (equal (devtools-test--complete "select o.cu| from orders o")
+                 '("cu" ("id integer" "customer text")))))
+
+(ert-deftest devtools-test-complete-columns-after-table ()
+  (should (equal (cadr (devtools-test--complete "select customers.| from customers"))
+                 '("id integer" "email text"))))
+
+(ert-deftest devtools-test-complete-tables-of-schema ()
+  (should (equal (devtools-test--complete "select * from sales.|")
+                 '("" ("leads view")))))
+
+(ert-deftest devtools-test-complete-tables-and-statement-columns ()
+  ;; Columns of the statement's tables first, then every table.
+  (should (equal (cadr (devtools-test--complete "select | from orders"))
+                 '("id integer" "customer text"
+                   "orders table" "customers table" "sales.leads view")))
+  ;; With several tables, columns name their table.
+  (should (member "email text  customers"
+                  (cadr (devtools-test--complete
+                         "select | from orders o join customers c on c.id = o.id")))))
+
+(ert-deftest devtools-test-complete-not-in-strings ()
+  (should-not (devtools-test--complete "select 'o.|' from orders o")))
+
+(defun devtools-test--wait-for-schema (conn profile)
+  "Wait up to 10s for the schema of CONN in PROFILE to load."
+  (let ((key (devtools-sql-schema--key conn profile))
+        (deadline (+ (float-time) 10)))
+    (while (and (gethash key devtools-sql-schema--loading) (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (gethash key devtools-sql-schema--cache)))
+
+(ert-deftest devtools-test-postgres-schema-completion ()
+  (skip-unless (getenv "DEVTOOLS_PG_PORT"))
+  (let ((devtools-sql-schema--cache (make-hash-table :test #'equal))
+        (devtools-sql-schema--loading (make-hash-table :test #'equal)))
+    (devtools-test--with-query-file
+      ;; Opening the file starts loading the schema.
+      (should (gethash '(local . "app") devtools-sql-schema--loading))
+      (should (equal (plist-get (devtools-sql-schema--find-table
+                                 (devtools-test--wait-for-schema conn 'local) "orders")
+                                :columns)
+                     '(("id" . "integer") ("customer" . "text") ("total" . "numeric")
+                       ("status" . "text") ("created_at" . "timestamp with time zone"))))
+      (insert "select o.sta from orders o")
+      (goto-char (point-min))
+      (search-forward "o.sta")
+      (should (member "status" (nth 2 (devtools-sql-schema-completion-at-point)))))))
+
+(ert-deftest devtools-test-postgres-schema-reloads-after-ddl ()
+  (skip-unless (getenv "DEVTOOLS_PG_PORT"))
+  (let ((devtools-sql-schema--cache (make-hash-table :test #'equal))
+        (devtools-sql-schema--loading (make-hash-table :test #'equal)))
+    (devtools-test--with-query-file
+      (let ((result (lambda () (get-buffer "*SQL Result: local/app*"))))
+        (unwind-protect
+            (progn
+              (devtools-test--wait-for-schema conn 'local)
+              (save-window-excursion
+                (devtools-sql-run-string "create table devtools_tmp (note text)"))
+              (should (eq (devtools-test--wait-for-result (funcall result)) 'done))
+              (should (devtools-sql-schema--find-table
+                       (devtools-test--wait-for-schema conn 'local) "devtools_tmp")))
+          (save-window-excursion
+            (devtools-sql-run-string "drop table if exists devtools_tmp"))
+          (devtools-test--wait-for-result (funcall result))
+          (should-not (devtools-sql-schema--find-table
+                       (devtools-test--wait-for-schema conn 'local) "devtools_tmp")))))))
+
 ;;; devtools-test.el ends here

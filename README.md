@@ -54,10 +54,29 @@ In a query file (`devtools-sql-query-mode`):
 | `C-c C-c`   | Run the query at point (blank-line separated), or the region |
 | `C-c C-z`   | psql REPL for this file's connection                         |
 | `M-x devtools-sql-run-string` | Type a query and run it                    |
+| `C-M-i`     | Complete table and column names (corfu, company, etc.)       |
+| `M-x devtools-sql-refresh-schema` | Reload the names offered for completion |
 
 Each query runs in its own psql process; with several statements, the result
 of the last one is shown.  Session state (`SET`, temp tables, open
 transactions) does not carry over between runs; use the REPL for that.
+
+### Completion
+
+Tables and columns load in the background when a query file opens (cached per
+environment and connection), and reload after a successful `CREATE`, `ALTER`
+or `DROP`.  What is offered depends on what comes before point:
+
+| Before point      | Candidates                                            |
+|-------------------|-------------------------------------------------------|
+| `orders.`         | Columns of `orders`                                   |
+| `o.`              | Columns of the table aliased `o` in the statement     |
+| `sales.`          | Tables of the schema `sales`                          |
+| anything else     | Columns of the statement's tables, then all tables    |
+
+Tables outside `public` are offered qualified (`sales.leads`).  Annotations show
+the column type, or whether a name is a table or a view.  Only tables your user
+can see in `information_schema` are listed.
 
 In a result buffer (`devtools-sql-result-mode`):
 

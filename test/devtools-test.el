@@ -942,7 +942,8 @@
 (ert-deftest devtools-test-menu-entries ()
   (dolist (command '(devtools-sql-query devtools-sql-query-named
                      devtools-sql-find-file devtools-sql-find-file-everywhere))
-    (should (transient-get-suffix 'devtools-menu command))))
+    (should (transient-get-suffix 'devtools-menu command)))
+  (should (transient-get-suffix 'devtools-menu "-e")))
 
 ;;; Commands follow the current buffer
 
@@ -1007,5 +1008,74 @@
                 (should (eq devtools-sql-profile 'prod))
                 (kill-buffer))))
         (delete-directory devtools-sql-query-directory t)))))
+
+;;; The menu's one-shot environment option
+
+(defun devtools-test--press (keys)
+  "Press KEYS in the active transient menu, running each command found."
+  (setq unread-command-events (listify-key-sequence (kbd keys)))
+  (let (sequence)
+    (while unread-command-events
+      (setq sequence (vconcat sequence (vector (read-event))))
+      (let ((command (lookup-key transient--transient-map sequence)))
+        (when (and command (not (keymapp command)))
+          (setq last-command-event (aref sequence (1- (length sequence)))
+                sequence nil)
+          (let ((this-command command))
+            (run-hooks 'pre-command-hook)
+            (command-execute command)
+            (run-hooks 'post-command-hook)))))))
+
+(ert-deftest devtools-test-menu-environment-option ()
+  (devtools-test--with-profiles
+    (let ((devtools-sql-query-directory (make-temp-file "devtools-sql" t))
+          prompts)
+      (unwind-protect
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt collection &rest _)
+                       (push prompt prompts)
+                       (if (string-prefix-p "Query file" prompt)
+                           (car (car collection))
+                         "prod"))))
+            (save-window-excursion
+              (call-interactively #'devtools-menu)
+              (devtools-test--press "-e")
+              (devtools-test--press "f"))
+            (should (member "Query file [prod]: " prompts))
+            ;; The current environment did not change.
+            (should (eq (devtools-current-profile) 'local))
+            ;; Next time, the option is unset again.
+            (setq prompts nil)
+            (save-window-excursion
+              (call-interactively #'devtools-menu)
+              (devtools-test--press "f"))
+            (should (member "Query file [local]: " prompts)))
+        (dolist (buffer (buffer-list))
+          (when (and (buffer-file-name buffer)
+                     (string-prefix-p devtools-sql-query-directory (buffer-file-name buffer)))
+            (kill-buffer buffer)))
+        (delete-directory devtools-sql-query-directory t)))))
+
+(ert-deftest devtools-test-menu-chosen-environment ()
+  (devtools-test--with-profiles
+    (cl-letf (((symbol-function 'transient-args)
+               (lambda (_prefix) '("--environment=prod"))))
+      ;; Only for commands run from the menu.
+      (should-not (devtools-menu--chosen-environment))
+      (let ((transient-current-command 'devtools-menu))
+        (should (eq (devtools-menu--chosen-environment) 'prod))
+        ;; It wins over the buffer's environment.
+        (with-temp-buffer
+          (devtools-sql--mark-buffer (devtools-test--conn 'local "app") 'local)
+          (should (eq (devtools-sql-command-profile) 'prod))))
+      (cl-letf (((symbol-function 'transient-args)
+                 (lambda (_prefix) '("--environment=gone"))))
+        (let ((transient-current-command 'devtools-menu))
+          (should-not (devtools-menu--chosen-environment)))))
+    ;; The label says which environment applies when it is not set.
+    (should (string-match-p "(default local)" (devtools-menu--environment-description)))
+    (with-temp-buffer
+      (devtools-sql--mark-buffer (devtools-test--conn 'prod "writer") 'prod)
+      (should (string-match-p "(default prod)" (devtools-menu--environment-description))))))
 
 ;;; devtools-test.el ends here

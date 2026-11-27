@@ -56,6 +56,7 @@ The rows show up as an aligned table in `*SQL Result: local/app*`.
 | Key       | Action                                            |
 |-----------|---------------------------------------------------|
 | `C-c d e` | Switch environment (menu stays open)              |
+| `C-c d -e` | Environment for the next command only            |
 | `C-c d p` | psql REPL for a connection                        |
 | `C-c d q` | Default query file of a datasource                |
 | `C-c d n` | Named query file of a datasource (new or existing) |
@@ -65,6 +66,12 @@ The rows show up as an aligned table in `*SQL Result: local/app*`.
 In a query file, a psql REPL or a result buffer, `p`, `q`, `n` and `f` use
 that buffer's environment rather than the current one, and `p`, `q` and `n`
 offer its datasource as the default (`RET` picks it).
+
+To use another environment for one command without switching, set `-e` in
+the menu first: `C-c d -e local RET f` finds files in `local` while the
+current environment stays as it is.  The menu shows which environment
+applies (`For this command (default local)`, or `For this command: local`
+once set), and `-e` is unset again the next time the menu opens.
 
 A prefix argument typed before `C-c d` does not reach the command you pick; type
 it inside the menu instead (`C-c d C-u q` is the same as `C-c d n`).

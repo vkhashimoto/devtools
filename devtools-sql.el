@@ -105,11 +105,19 @@ Return nil elsewhere, or if PROFILE is no longer in the profiles."
                               (plist-get devtools-sql-result--info :connection))))))
     (and (car context) (assq (car context) devtools-profiles) context)))
 
+(defvar devtools-sql-command-profile-function nil
+  "Function returning the environment chosen for the running command.
+It returns nil when none was chosen.  `devtools-menu' sets it, for its
+one-shot environment option.")
+
 (defun devtools-sql-command-profile ()
   "Return the environment for a devtools command run now.
-That is the current buffer's environment in a query, REPL or result
-buffer, else the current environment."
-  (or (car (devtools-sql--buffer-context))
+That is the one chosen for this command in the menu, if any, else the
+current buffer's environment in a query, REPL or result buffer, else
+the current environment."
+  (or (and devtools-sql-command-profile-function
+           (funcall devtools-sql-command-profile-function))
+      (car (devtools-sql--buffer-context))
       (devtools-current-profile)))
 
 (defun devtools-sql--read-connection (&optional profile)
